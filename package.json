@@ -7,7 +7,11 @@
   "exports": {
     ".": "./src/index.ts"
   },
+  "bin": {
+    "cucumber-effect": "./src/bin/cucumber-effect.ts"
+  },
   "scripts": {
+    "cli": "node --disable-warning=ExperimentalWarning --experimental-transform-types src/bin/cucumber-effect.ts",
     "typecheck": "tsc --noEmit",
     "diagnostics": "effect-language-service diagnostics --project tsconfig.json --strict",
     "lint": "effect-language-service diagnostics --project tsconfig.json --strict",
