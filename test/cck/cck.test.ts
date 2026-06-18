@@ -2,7 +2,7 @@ import { it, expect } from "@effect/vitest"
 import { NodeFileSystem, NodePath } from "@effect/platform-node"
 import { Effect, FileSystem, Layer, Path } from "effect"
 import { runFeaturesToArray } from "../../src/index.ts"
-import { messagesFromNdjson, normalize } from "./normalize.ts"
+import { normalizeForCckComparison, readCckNdjsonMessages } from "./normalize.ts"
 import { cckStepsFor } from "./steps.ts"
 
 const kitRoot = "node_modules/@cucumber/compatibility-kit/features"
@@ -28,8 +28,7 @@ it.effect.each(samples)("CCK fixture: %s", (sample) =>
     const ndjsonPath = path.join(kitRoot, sample, `${sample}.ndjson`)
     const actual = yield* runFeaturesToArray([featurePath], {
       relativeTo: kitRoot,
-      uriPrefix: "samples",
     })
-    const expected = yield* messagesFromNdjson(yield* fs.readFileString(ndjsonPath))
-    expect(normalize(actual)).toEqual(normalize(expected))
+    const expected = yield* readCckNdjsonMessages(yield* fs.readFileString(ndjsonPath))
+    expect(normalizeForCckComparison(actual)).toEqual(normalizeForCckComparison(expected))
   }).pipe(Effect.provide(Layer.mergeAll(cckStepsFor(sample), NodeFileSystem.layer, NodePath.layer))))

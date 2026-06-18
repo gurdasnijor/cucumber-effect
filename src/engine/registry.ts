@@ -11,7 +11,6 @@ import {
 import { StepDefinitionPatternType, type SourceReference, type StepMatchArgument } from "@cucumber/messages"
 import { Context, Effect, Layer } from "effect"
 import { AmbiguousStep, type StepError, UndefinedStep } from "./errors.ts"
-import type { EventBus } from "./event-bus.ts"
 import type { ActiveStepContext, Attachments } from "./world.ts"
 
 class SupportDataTable {
@@ -32,7 +31,7 @@ type StepReturn =
   | void
   | "pending"
   | "skipped"
-  | Effect.Effect<void | "pending" | "skipped", StepError, ActiveStepContext | Attachments | EventBus>
+  | Effect.Effect<void | "pending" | "skipped", StepError, ActiveStepContext | Attachments>
 
 export type StepImplementation = (...args: ReadonlyArray<unknown>) => StepReturn
 

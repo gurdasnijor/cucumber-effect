@@ -1,7 +1,12 @@
+import { NodeStream } from "@effect/platform-node"
 import { NdjsonToMessageStream } from "@cucumber/message-streams"
 import type { Envelope } from "@cucumber/messages"
-import { Effect, Schema } from "effect"
+import { Effect, Schema, Stream } from "effect"
+import { Readable } from "node:stream"
 
+// CCK fixtures are produced by another implementation. These helpers keep the
+// assertion focused on message semantics instead of generated ids, timestamps,
+// source-reference paths, and the fixture repo's "samples/" path convention.
 type Json = undefined | null | boolean | number | string | Json[] | { readonly [key: string]: Json }
 
 export class NdjsonMessageStreamError extends Schema.TaggedErrorClass<NdjsonMessageStreamError>()(
@@ -9,33 +14,13 @@ export class NdjsonMessageStreamError extends Schema.TaggedErrorClass<NdjsonMess
   { error: Schema.Unknown },
 ) {}
 
-export const messagesFromNdjson = Effect.fn("messagesFromNdjson")((input: string) =>
-  Effect.callback<ReadonlyArray<Envelope>, NdjsonMessageStreamError>((resume) => {
-    const stream = new NdjsonToMessageStream()
-    const envelopes: Array<Envelope> = []
-    const onData = (chunk: unknown) => {
-      envelopes.push(chunk as Envelope)
-    }
-    const onError = (error: unknown) => {
-      resume(new NdjsonMessageStreamError({ error }))
-    }
-    const onEnd = () => {
-      resume(Effect.succeed(envelopes))
-    }
+export const readCckNdjsonMessages = Effect.fn("readCckNdjsonMessages")((input: string) =>
+  NodeStream.fromReadable<Envelope, NdjsonMessageStreamError>({
+    evaluate: () => Readable.from([input]).pipe(new NdjsonToMessageStream()),
+    onError: (error) => new NdjsonMessageStreamError({ error }),
+  }).pipe(Stream.runCollect))
 
-    stream.on("data", onData)
-    stream.once("error", onError)
-    stream.once("end", onEnd)
-    stream.end(input)
-
-    return Effect.sync(() => {
-      stream.off("data", onData)
-      stream.off("error", onError)
-      stream.off("end", onEnd)
-    })
-  }))
-
-export const normalize = (envelopes: ReadonlyArray<Envelope>): ReadonlyArray<Json> => {
+export const normalizeForCckComparison = (envelopes: ReadonlyArray<Envelope>): ReadonlyArray<Json> => {
   const ids = new Map<string, string>()
   const remap = (id: string) => {
     const existing = ids.get(id)
@@ -48,7 +33,7 @@ export const normalize = (envelopes: ReadonlyArray<Envelope>): ReadonlyArray<Jso
   }
 
   return envelopes
-    .filter((envelope) => envelope.suggestion === undefined)
+    .filter((envelope) => envelope.suggestion === undefined && envelope.meta === undefined)
     .map((envelope) => normalizeValue(envelope as unknown as Json, remap, undefined))
 }
 
@@ -72,9 +57,6 @@ const normalizeValue = (
   }
   if (key === "duration") {
     return { seconds: 0, nanos: 0 }
-  }
-  if ("meta" in value) {
-    return { meta: { protocolVersion: "31.1.0" } }
   }
   if ("sourceReference" in value) {
     const entries = Object.entries(value).filter(([entryKey, entryValue]) =>
@@ -110,5 +92,6 @@ const shouldRemapId = (key: string | undefined) =>
 const stripPath = (value: string) =>
   value
     .replaceAll(process.cwd(), "<cwd>")
+    .replace(/(?:samples\/)?[a-z0-9-]+\/[a-z0-9-]+\.feature(?:\.md)?/gi, "samples/<path>")
     .replace(/samples\/[^:\n]+/g, "samples/<path>")
     .replace(/node_modules\/[^:\n]+/g, "node_modules/<path>")

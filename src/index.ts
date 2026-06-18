@@ -1,5 +1,4 @@
 export { AmbiguousStep, StepFailed, StepPending, StepSkipped, UndefinedStep } from "./engine/errors.ts"
-export { EventBus } from "./engine/event-bus.ts"
 export {
   Registry,
   defineSupport,
