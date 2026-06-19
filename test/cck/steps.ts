@@ -253,6 +253,40 @@ export const cckStepsFor = (sample: string) => {
       return defineSupport(({ Given }) => {
         Given(/^a (.*?)(?: and a (.*?))?(?: and a (.*?))?$/, () => undefined)
       })
+    case "retry":
+      return defineSupport(({ Given }) => {
+        let secondTimePass = 0
+        let thirdTimePass = 0
+        Given("a step that always passes", () => undefined)
+        Given("a step that passes the second time", () => {
+          secondTimePass += 1
+          if (secondTimePass < 2) {
+            throw new Error("Exception in step")
+          }
+          return undefined
+        })
+        Given("a step that passes the third time", () => {
+          thirdTimePass += 1
+          if (thirdTimePass < 3) {
+            throw new Error("Exception in step")
+          }
+          return undefined
+        })
+        Given("a step that always fails", () => {
+          throw new Error("Exception in step")
+        })
+      })
+    case "retry-ambiguous":
+      return defineSupport(({ Given }) => {
+        Given("an ambiguous step", () => undefined)
+        Given("an ambiguous step", () => undefined)
+      })
+    case "retry-pending":
+      return defineSupport(({ Given }) => {
+        Given("a pending step", () => "pending")
+      })
+    case "retry-undefined":
+      return defineSupport(() => undefined)
     case "ambiguous":
       return defineSupport(({ Given }) => {
         Given(/^a (.*?) with (.*?)$/, () => undefined)

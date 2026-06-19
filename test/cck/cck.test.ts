@@ -35,6 +35,10 @@ const samples = [
   "skipped",
   "skipped-failing-hook",
   "regular-expression",
+  "retry",
+  "retry-ambiguous",
+  "retry-pending",
+  "retry-undefined",
   "ambiguous",
   "unused-steps",
   "rules",
@@ -50,6 +54,7 @@ it.effect.each(samples)("CCK fixture: %s", (sample) =>
     const ndjsonPath = path.join(kitRoot, sample, `${sample}.ndjson`)
     const actual = yield* runFeaturesToArray([featurePath], {
       relativeTo: kitRoot,
+      ...runOptions(sample),
     })
     const expected = yield* readCckNdjsonMessages(yield* fs.readFileString(ndjsonPath))
     expect(normalizeForCckComparison(actual)).toEqual(normalizeForCckComparison(expected))
@@ -57,3 +62,6 @@ it.effect.each(samples)("CCK fixture: %s", (sample) =>
 
 const featureFileName = (sample: string) =>
   sample === "examples-tables-undefined" ? "examples-undefined.feature" : `${sample}.feature`
+
+const runOptions = (sample: string) =>
+  sample.startsWith("retry") ? { allowedRetries: 2 } : {}

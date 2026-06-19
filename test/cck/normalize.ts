@@ -33,7 +33,7 @@ export const normalizeForCckComparison = (envelopes: ReadonlyArray<Envelope>): R
   }
 
   return envelopes
-    .filter((envelope) => envelope.suggestion === undefined && envelope.meta === undefined)
+    .filter((envelope) => envelope.meta === undefined)
     .map((envelope) => normalizeValue(envelope as unknown as Json, remap, undefined))
 }
 
