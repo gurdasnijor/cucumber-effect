@@ -2,14 +2,13 @@ import { NodeStream } from "@effect/platform-node"
 import { GherkinStreams, type IGherkinStreamOptions } from "@cucumber/gherkin-streams"
 import {
   IdGenerator,
-  TestStepResultStatus,
   TimeConversion,
   type Envelope,
 } from "@cucumber/messages"
 import { Effect, Stream } from "effect"
 import { GherkinStreamError } from "./errors.ts"
-import type { Registry } from "./registry.ts"
-import { assembleTestCases, emitStepDefinitions, runScenario, testRunSuccess } from "./scenario.ts"
+import { Registry } from "./registry.ts"
+import { assembleTestCases, runScenario, supportCodeEnvelopes, testRunSuccess } from "./scenario.ts"
 
 export type RunFeaturesOptions = Pick<IGherkinStreamOptions, "relativeTo">
 
@@ -33,8 +32,10 @@ const runFeaturePlan = Effect.fn("runFeaturePlan")(function* (
   options: RunFeaturesOptions,
 ) {
   const parsed = yield* gherkinEnvelopesFromPaths(paths, nextId, options)
+  const registry = yield* Registry
+  const supportCodeLibrary = registry.buildSupportCodeLibrary(nextId)
 
-  const stepDefinitions = yield* emitStepDefinitions(nextId)
+  const supportEnvelopes = supportCodeEnvelopes(supportCodeLibrary)
   const testRunStartedId = nextId()
   const testRunStarted: Envelope = {
     testRunStarted: {
@@ -43,7 +44,7 @@ const runFeaturePlan = Effect.fn("runFeaturePlan")(function* (
     },
   }
 
-  const testCases = yield* assembleTestCases(nextId, testRunStartedId, parsed.pickles, stepDefinitions.stepDefinitionIds)
+  const testCases = assembleTestCases(nextId, testRunStartedId, supportCodeLibrary, parsed.gherkinDocuments, parsed.pickles)
   const scenarioResults = yield* Effect.forEach(
     testCases,
     (testCase) => runScenario(nextId, testCase, 0),
@@ -61,9 +62,9 @@ const runFeaturePlan = Effect.fn("runFeaturePlan")(function* (
 
   return [
     ...parsed.envelopes,
-    ...stepDefinitions.envelopes,
+    ...supportEnvelopes,
     testRunStarted,
-    ...testCases.map((testCase): Envelope => ({ testCase: testCase.testCase })),
+    ...testCases.map((testCase): Envelope => ({ testCase: testCase.toMessage() })),
     ...scenarioResults.flatMap((result) => result.envelopes),
     testRunFinished,
   ]
@@ -85,7 +86,8 @@ const gherkinEnvelopesFromPaths = Effect.fn("gherkinEnvelopesFromPaths")(functio
     evaluate: () => GherkinStreams.fromPaths(paths, gherkinOptions),
     onError: (error) => new GherkinStreamError({ error }),
   }).pipe(Stream.runCollect)
+  const gherkinDocuments = envelopes.flatMap((envelope) => envelope.gherkinDocument === undefined ? [] : [envelope.gherkinDocument])
   const pickles = envelopes.flatMap((envelope) => envelope.pickle === undefined ? [] : [envelope.pickle])
 
-  return { envelopes, pickles }
+  return { envelopes, gherkinDocuments, pickles }
 })

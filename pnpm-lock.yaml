@@ -14,6 +14,9 @@ importers:
       '@cucumber/compatibility-kit':
         specifier: 29.2.2
         version: 29.2.2
+      '@cucumber/core':
+        specifier: 0.9.0
+        version: 0.9.0(@cucumber/cucumber-expressions@20.0.0)(@cucumber/messages@33.0.2)(@cucumber/query@16.0.0(@cucumber/messages@33.0.2))(@cucumber/tag-expressions@10.0.0)
       '@cucumber/cucumber-expressions':
         specifier: 20.0.0
         version: 20.0.0
@@ -74,6 +77,14 @@ packages:
 
   '@cucumber/compatibility-kit@29.2.2':
     resolution: {integrity: sha512-KkUaXLJBhXKXmo7hAWC9BMwGcyx7z1Tn6GirJeIZIoDTTRrm24fQaiw0he/FJUP8TQApiJkJtu40EMckY9X8vg==}
+
+  '@cucumber/core@0.9.0':
+    resolution: {integrity: sha512-nKhl1Qou9nbc42B1y0F0F0DnjlForEPxM+8efbmk1SQE7FZP4u+LWng9rzi5OHjLyHfGE3GSbLV4xjau4pDQzQ==}
+    peerDependencies:
+      '@cucumber/cucumber-expressions': '*'
+      '@cucumber/messages': '>=31.0.0'
+      '@cucumber/query': '*'
+      '@cucumber/tag-expressions': '*'
 
   '@cucumber/cucumber-expressions@20.0.0':
     resolution: {integrity: sha512-t2FBLKuU0U1nP5FM8pHiVonYcXVm07fvXr/H9osdvrjcLXSWc5OCbOOqV/k5S56w/YndPv1Sv2/m/x1KBYvIlA==}
@@ -950,6 +961,13 @@ snapshots:
   '@cucumber/ci-environment@14.0.0': {}
 
   '@cucumber/compatibility-kit@29.2.2': {}
+
+  '@cucumber/core@0.9.0(@cucumber/cucumber-expressions@20.0.0)(@cucumber/messages@33.0.2)(@cucumber/query@16.0.0(@cucumber/messages@33.0.2))(@cucumber/tag-expressions@10.0.0)':
+    dependencies:
+      '@cucumber/cucumber-expressions': 20.0.0
+      '@cucumber/messages': 33.0.2
+      '@cucumber/query': 16.0.0(@cucumber/messages@33.0.2)
+      '@cucumber/tag-expressions': 10.0.0
 
   '@cucumber/cucumber-expressions@20.0.0':
     dependencies:

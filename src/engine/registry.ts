@@ -1,175 +1,95 @@
 import {
-  CucumberExpression,
-  ParameterType,
-  ParameterTypeRegistry,
-  RegularExpression,
-  type Argument,
-  type Expression,
-  type RegExps,
-  type StringOrRegExp,
-} from "@cucumber/cucumber-expressions"
-import { StepDefinitionPatternType, type SourceReference, type StepMatchArgument } from "@cucumber/messages"
-import { Context, Effect, Layer } from "effect"
-import { AmbiguousStep, type StepError, UndefinedStep } from "./errors.ts"
+  buildSupportCode,
+  type NewParameterType,
+  type SupportCodeFunction,
+  type SupportCodeLibrary,
+} from "@cucumber/core"
+import type { IdGenerator } from "@cucumber/messages"
+import { Context, Layer, type Effect } from "effect"
+import type { StepError } from "./errors.ts"
 import type { ActiveStepContext, Attachments } from "./world.ts"
 
-class SupportDataTable {
-  constructor(private readonly rows: ReadonlyArray<ReadonlyArray<string>>) {}
-
-  raw() {
-    return this.rows
-  }
-
-  transpose() {
-    const width = this.rows.reduce((max, row) => Math.max(max, row.length), 0)
-    return new SupportDataTable(Array.from({ length: width }, (_, column) =>
-      this.rows.map((row) => row[column] ?? "")))
-  }
-}
-
-type StepReturn =
+type StepReturn<R> =
   | void
   | "pending"
   | "skipped"
-  | Effect.Effect<void | "pending" | "skipped", StepError, ActiveStepContext | Attachments>
+  | Promise<void | "pending" | "skipped">
+  | Effect.Effect<void | "pending" | "skipped", StepError, R | ActiveStepContext | Attachments>
 
-export type StepImplementation = (...args: ReadonlyArray<unknown>) => StepReturn
+export type StepImplementation<R = never> = (...args: ReadonlyArray<unknown>) => StepReturn<R>
+
+type SupportParameterType<T = unknown> = Omit<NewParameterType, "sourceReference" | "transformer"> & {
+  readonly transformer?: (...matches: ReadonlyArray<string>) => T
+  readonly sourceReference?: NewParameterType["sourceReference"]
+}
 
 type SupportStepDefinition = {
-  readonly expression: StringOrRegExp
-  readonly implementation: StepImplementation
-  readonly sourceReference?: SourceReference
+  readonly pattern: string | RegExp
+  readonly implementation: StepImplementation<unknown>
 }
 
-export type RegisteredSupportStepDefinition = SupportStepDefinition & {
-  readonly patternType: StepDefinitionPatternType
-  readonly patternSource: string
-  readonly expressionObject: Expression
-}
-
-type SupportParameterType<T = unknown> = {
-  readonly name: string
-  readonly regexp: RegExps
-  readonly transformer: (...matches: ReadonlyArray<string>) => T
-  readonly useForSnippets?: boolean
-  readonly preferForRegexpMatch?: boolean
-}
-
-export type ResolvedStep = {
-  readonly definition: RegisteredSupportStepDefinition
-  readonly definitionIndex: number
-  readonly args: ReadonlyArray<unknown>
-  readonly matchArguments: ReadonlyArray<StepMatchArgument>
-}
+type SupportRegistration =
+  | { readonly _tag: "ParameterType"; readonly definition: SupportParameterType }
+  | { readonly _tag: "Step"; readonly definition: SupportStepDefinition }
 
 export type SupportBuilder = {
-  readonly Given: (expression: StringOrRegExp, implementation: StepImplementation) => void
-  readonly When: (expression: StringOrRegExp, implementation: StepImplementation) => void
-  readonly Then: (expression: StringOrRegExp, implementation: StepImplementation) => void
+  readonly Given: <R>(expression: string | RegExp, implementation: StepImplementation<R>) => void
+  readonly When: <R>(expression: string | RegExp, implementation: StepImplementation<R>) => void
+  readonly Then: <R>(expression: string | RegExp, implementation: StepImplementation<R>) => void
   readonly ParameterType: <T>(definition: SupportParameterType<T>) => void
 }
 
 export class Registry extends Context.Service<Registry, {
-  readonly definitions: ReadonlyArray<RegisteredSupportStepDefinition>
-  readonly parameterTypes: ReadonlyArray<SupportParameterType>
-  readonly match: (text: string) => Effect.Effect<ReadonlyArray<ResolvedStep>>
-  readonly resolve: (text: string) => Effect.Effect<ResolvedStep, UndefinedStep | AmbiguousStep>
-}>()("cucumber-effect/engine/registry") {
-  static readonly layerFromDefinitions = (
-    definitions: ReadonlyArray<SupportStepDefinition>,
-    parameterTypes: ReadonlyArray<SupportParameterType>,
-  ) =>
-    Layer.effect(this, Effect.sync(() => {
-      const parameterTypeRegistry = new ParameterTypeRegistry()
-      for (const definition of parameterTypes) {
-        parameterTypeRegistry.defineParameterType(new ParameterType(
-          definition.name,
-          definition.regexp,
-          null,
-          (...matches) => definition.transformer(...matches),
-          definition.useForSnippets,
-          definition.preferForRegexpMatch,
-        ))
-      }
-
-      const registered = definitions.map((definition) => {
-        if (definition.expression instanceof RegExp) {
-          return {
-            ...definition,
-            patternType: StepDefinitionPatternType.REGULAR_EXPRESSION,
-            patternSource: definition.expression.source,
-            expressionObject: new RegularExpression(definition.expression, parameterTypeRegistry),
-          }
-        }
-        return {
-          ...definition,
-          patternType: StepDefinitionPatternType.CUCUMBER_EXPRESSION,
-          patternSource: definition.expression,
-          expressionObject: new CucumberExpression(definition.expression, parameterTypeRegistry),
-        }
-      })
-
-      return Registry.of({
-        definitions: registered,
-        parameterTypes,
-        match: Effect.fn("Registry.match")((text: string) =>
-          Effect.sync(() => findMatches(registered, text))),
-        resolve: Effect.fn("Registry.resolve")(function* (text: string) {
-          const matches = yield* Effect.sync(() => findMatches(registered, text))
-          if (matches.length === 0) {
-            return yield* new UndefinedStep({ text })
-          }
-          if (matches.length > 1) {
-            return yield* new AmbiguousStep({ text, count: matches.length })
-          }
-          return matches[0] as ResolvedStep
-        }),
-      })
-    }))
-}
-
-const findMatches = (registered: ReadonlyArray<RegisteredSupportStepDefinition>, text: string) =>
-  registered.flatMap((definition, definitionIndex) => {
-    const args = definition.expressionObject.match(text)
-    return args === null
-      ? []
-      : [{
-        definition,
-        definitionIndex,
-        args: args.map((arg) => arg.getValue(null)),
-        matchArguments: args.map(toStepMatchArgument),
-      }]
-  })
-
-export const makeDataTable = (rows: ReadonlyArray<ReadonlyArray<string>>) => new SupportDataTable(rows)
+  readonly buildSupportCodeLibrary: (nextId: IdGenerator.NewId) => SupportCodeLibrary
+}>()("cucumber-effect/engine/registry") {}
 
 export const defineSupport = (register: (builder: SupportBuilder) => void) => {
-  const definitions: Array<SupportStepDefinition> = []
-  const parameterTypes: Array<SupportParameterType> = []
-  const add = (expression: StringOrRegExp, implementation: StepImplementation) => {
-    definitions.push({ expression, implementation })
+  const registrations: Array<SupportRegistration> = []
+  const defineStep = <R>(pattern: string | RegExp, implementation: StepImplementation<R>) => {
+    registrations.push({
+      _tag: "Step",
+      definition: { pattern, implementation: implementation as StepImplementation<unknown> },
+    })
   }
+
   register({
-    Given: add,
-    When: add,
-    Then: add,
-    ParameterType: (definition) => {
-      parameterTypes.push(definition)
-    },
+    Given: defineStep,
+    When: defineStep,
+    Then: defineStep,
+    ParameterType: (definition) => registrations.push({ _tag: "ParameterType", definition }),
   })
-  return Registry.layerFromDefinitions(definitions, parameterTypes)
+
+  return Layer.succeed(Registry, Registry.of({
+    buildSupportCodeLibrary: (nextId) => buildRegisteredSupport(registrations, nextId),
+  }))
 }
 
-const toStepMatchArgument = (argument: Argument): StepMatchArgument => {
-  const parameterTypeName = argument.getParameterType().name
-  return {
-    group: toGroup(argument.group),
-    ...(parameterTypeName === undefined ? {} : { parameterTypeName }),
+const buildRegisteredSupport = (
+  registrations: ReadonlyArray<SupportRegistration>,
+  nextId: IdGenerator.NewId,
+) => {
+  const builder = buildSupportCode({ newId: nextId })
+  for (const registration of registrations) {
+    if (registration._tag === "ParameterType") {
+      builder.parameterType(toCoreParameterType(registration.definition))
+    } else {
+      builder.step({
+        pattern: registration.definition.pattern,
+        fn: registration.definition.implementation as SupportCodeFunction,
+        sourceReference: {},
+      })
+    }
   }
+  return builder.build()
 }
 
-const toGroup = (group: Argument["group"]): StepMatchArgument["group"] => ({
-  ...(group.start === undefined ? {} : { start: group.start }),
-  value: group.value,
-  ...(group.children === undefined ? {} : { children: group.children.map(toGroup) }),
+const toCoreParameterType = (definition: SupportParameterType): NewParameterType => ({
+  name: definition.name,
+  regexp: definition.regexp,
+  sourceReference: definition.sourceReference ?? {},
+  ...(definition.useForSnippets === undefined ? {} : { useForSnippets: definition.useForSnippets }),
+  ...(definition.preferForRegexpMatch === undefined ? {} : { preferForRegexpMatch: definition.preferForRegexpMatch }),
+  ...(definition.transformer === undefined
+    ? {}
+    : { transformer: (...matches: string[]) => definition.transformer?.(...matches) }),
 })
