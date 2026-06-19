@@ -8,23 +8,34 @@ import { cckStepsFor } from "./steps.ts"
 const kitRoot = "node_modules/@cucumber/compatibility-kit/features"
 
 const samples = [
+  "all-statuses",
+  "attachments",
   "minimal",
   "cdata",
   "backgrounds",
+  "data-tables",
   "doc-strings",
+  "empty",
+  "examples-tables",
+  "examples-tables-attachment",
+  "examples-tables-undefined",
+  "failedish-combinations",
   "parameter-types",
   "pending",
   "skipped",
   "regular-expression",
   "ambiguous",
   "unused-steps",
+  "rules",
+  "undefined",
+  "unknown-parameter-type",
 ] as const
 
 it.effect.each(samples)("CCK fixture: %s", (sample) =>
   Effect.gen(function* () {
     const fs = yield* FileSystem.FileSystem
     const path = yield* Path.Path
-    const featurePath = path.join(kitRoot, sample, `${sample}.feature`)
+    const featurePath = path.join(kitRoot, sample, featureFileName(sample))
     const ndjsonPath = path.join(kitRoot, sample, `${sample}.ndjson`)
     const actual = yield* runFeaturesToArray([featurePath], {
       relativeTo: kitRoot,
@@ -32,3 +43,6 @@ it.effect.each(samples)("CCK fixture: %s", (sample) =>
     const expected = yield* readCckNdjsonMessages(yield* fs.readFileString(ndjsonPath))
     expect(normalizeForCckComparison(actual)).toEqual(normalizeForCckComparison(expected))
   }).pipe(Effect.provide(Layer.mergeAll(cckStepsFor(sample), NodeFileSystem.layer, NodePath.layer))))
+
+const featureFileName = (sample: string) =>
+  sample === "examples-tables-undefined" ? "examples-undefined.feature" : `${sample}.feature`

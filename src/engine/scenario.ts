@@ -3,7 +3,9 @@ import {
   makeTestPlan,
   type AssembledTestCase,
   type AssembledTestStep,
+  type DefinedTestRunHook,
   type PreparedStep,
+  type SupportCodeFunction,
   type SupportCodeLibrary,
 } from "@cucumber/core"
 import {
@@ -17,9 +19,16 @@ import {
   type Pickle,
   type TestStepResult,
 } from "@cucumber/messages"
-import { Cause, Clock, Effect, Exit, Option } from "effect"
+import { Cause, Clock, Effect, Exit, FileSystem, Option } from "effect"
 import { type StepError } from "./errors.ts"
-import { collectAttachments, provideStepWorld, type ActiveStepContext, type Attachments } from "./world.ts"
+import {
+  collectAttachments,
+  provideScenarioWorld,
+  provideStepWorld,
+  provideTestRunHookWorld,
+  type ScenarioWorld,
+  type WorldServices,
+} from "./world.ts"
 
 type ScenarioResult = {
   readonly statuses: ReadonlyArray<TestStepResultStatus>
@@ -33,7 +42,7 @@ type StepExecution = {
 
 type StepReturn = void | "pending" | "skipped"
 
-type StepEffect = Effect.Effect<StepReturn, StepError, ActiveStepContext | Attachments>
+type StepEffect = Effect.Effect<StepReturn, StepError, WorldServices>
 
 type ScenarioAttemptState = {
   readonly statuses: ReadonlyArray<TestStepResultStatus>
@@ -72,7 +81,7 @@ export const runScenario = Effect.fn("runScenario")(function* (
   nextId: IdGenerator.NewId,
   assembled: AssembledTestCase,
   attempt: number,
-): Effect.fn.Return<ScenarioResult> {
+): Effect.fn.Return<ScenarioResult, never, FileSystem.FileSystem> {
   const testCaseStartedId = nextId()
   const timestamp = TimeConversion.millisecondsSinceEpochToTimestamp(yield* Clock.currentTimeMillis)
   const testCaseStarted: Envelope = {
@@ -84,7 +93,7 @@ export const runScenario = Effect.fn("runScenario")(function* (
     },
   }
 
-  const result = yield* runScenarioAttempt(assembled, testCaseStartedId)
+  const result = yield* provideScenarioWorld(runScenarioAttempt(assembled, testCaseStartedId))
 
   const testCaseFinished: Envelope = {
     testCaseFinished: {
@@ -104,6 +113,75 @@ export const runScenario = Effect.fn("runScenario")(function* (
   }
 })
 
+export const runTestRunHooks = Effect.fn("runTestRunHooks")(function* (
+  nextId: IdGenerator.NewId,
+  testRunStartedId: string,
+  hooks: ReadonlyArray<DefinedTestRunHook>,
+): Effect.fn.Return<ScenarioResult, never, FileSystem.FileSystem> {
+  const results = yield* Effect.forEach(
+    hooks,
+    (hook) => runTestRunHook(nextId, testRunStartedId, hook),
+    { concurrency: 1 },
+  )
+  return {
+    statuses: results.map((result) => result.status),
+    envelopes: results.flatMap((result) => result.envelopes),
+  }
+})
+
+const runTestRunHook = Effect.fn("runTestRunHook")(function* (
+  nextId: IdGenerator.NewId,
+  testRunStartedId: string,
+  hook: DefinedTestRunHook,
+) {
+  const testRunHookStartedId = nextId()
+  const testRunHookStarted: Envelope = {
+    testRunHookStarted: {
+      id: testRunHookStartedId,
+      testRunStartedId,
+      hookId: hook.id,
+      timestamp: TimeConversion.millisecondsSinceEpochToTimestamp(yield* Clock.currentTimeMillis),
+    },
+  }
+  const started = yield* Clock.currentTimeMillis
+  const execution = yield* Effect.gen(function* () {
+    const exit = yield* invokeSupportFunction(hook.fn, []).pipe(Effect.exit)
+    const attachments = yield* collectAttachments()
+    return { exit, attachments }
+  }).pipe((effect) => provideTestRunHookWorld(effect, { testRunHookStartedId }))
+  const ended = yield* Clock.currentTimeMillis
+  const duration = TimeConversion.millisecondsToDuration(ended - started)
+  const result = Exit.match(execution.exit, {
+    onSuccess: (value): TestStepResult => ({
+      status: value === "pending"
+        ? TestStepResultStatus.PENDING
+        : value === "skipped"
+          ? TestStepResultStatus.SKIPPED
+          : TestStepResultStatus.PASSED,
+      duration,
+    }),
+    onFailure: (cause): TestStepResult => ({
+      ...resultFromCause(cause),
+      duration,
+    }),
+  })
+  const testRunHookFinished: Envelope = {
+    testRunHookFinished: {
+      testRunHookStartedId,
+      result,
+      timestamp: TimeConversion.millisecondsSinceEpochToTimestamp(yield* Clock.currentTimeMillis),
+    },
+  }
+  return {
+    status: result.status,
+    envelopes: [
+      testRunHookStarted,
+      ...execution.attachments.map((attachment): Envelope => ({ attachment })),
+      testRunHookFinished,
+    ],
+  }
+})
+
 const runScenarioAttempt = Effect.fn("runScenarioAttempt")(function* (
   assembled: AssembledTestCase,
   testCaseStartedId: string,
@@ -117,7 +195,7 @@ const runScenarioAttempt = Effect.fn("runScenarioAttempt")(function* (
 
   return yield* assembled.testSteps.reduce(
     (effect, step) => effect.pipe(Effect.flatMap((state) => runScenarioStep(state, step, testCaseStartedId))),
-    Effect.succeed(initial),
+    Effect.succeed(initial) as Effect.Effect<ScenarioAttemptState, never, ScenarioWorld | FileSystem.FileSystem>,
   )
 })
 
@@ -125,7 +203,7 @@ const runScenarioStep = Effect.fn("runScenarioStep")(function* (
   state: ScenarioAttemptState,
   step: AssembledTestStep,
   testCaseStartedId: string,
-): Effect.fn.Return<ScenarioAttemptState> {
+): Effect.fn.Return<ScenarioAttemptState, never, ScenarioWorld | FileSystem.FileSystem> {
   const testStepStarted: Envelope = {
     testStepStarted: {
       testCaseStartedId,
@@ -134,9 +212,11 @@ const runScenarioStep = Effect.fn("runScenarioStep")(function* (
     },
   }
 
-  const execution = (state.failedish || state.skipped) && !step.always
+  const execution = state.skipped && !step.always
     ? { result: zeroDurationResult(TestStepResultStatus.SKIPPED), attachments: [] }
-    : yield* executeStep(step, { testCaseStartedId, testStepId: step.id })
+    : state.failedish && !step.always
+      ? executeStepAfterFailure(step)
+      : yield* executeStep(step, { testCaseStartedId, testStepId: step.id })
 
   const result = execution.result
   const skipped = state.skipped || (result.status === TestStepResultStatus.SKIPPED && !state.failedish)
@@ -168,7 +248,7 @@ const runScenarioStep = Effect.fn("runScenarioStep")(function* (
 const executeStep = Effect.fn("executeStep")(function* (
   step: AssembledTestStep,
   active: { readonly testCaseStartedId: string; readonly testStepId: string },
-): Effect.fn.Return<StepExecution> {
+): Effect.fn.Return<StepExecution, never, ScenarioWorld | FileSystem.FileSystem> {
   const prepared = step.prepare()
   if (prepared.type === "undefined") {
     return { result: zeroDurationResult(TestStepResultStatus.UNDEFINED), attachments: [] }
@@ -204,21 +284,41 @@ const executeStep = Effect.fn("executeStep")(function* (
   return { result, attachments: execution.attachments }
 })
 
+const executeStepAfterFailure = (step: AssembledTestStep): StepExecution => {
+  const prepared = step.prepare()
+  if (prepared.type === "undefined") {
+    return { result: zeroDurationResult(TestStepResultStatus.UNDEFINED), attachments: [] }
+  }
+  if (prepared.type === "ambiguous") {
+    return { result: zeroDurationResult(TestStepResultStatus.AMBIGUOUS), attachments: [] }
+  }
+  return { result: zeroDurationResult(TestStepResultStatus.SKIPPED), attachments: [] }
+}
+
 const invokeStep = (prepared: PreparedStep): StepEffect =>
+  invokeSupportFunction(prepared.fn, [
+    ...prepared.args.map((arg) => arg.getValue(null)),
+    ...(prepared.dataTable === undefined ? [] : [DataTable.from(prepared.dataTable)]),
+    ...(prepared.docString === undefined ? [] : [prepared.docString.content]),
+  ])
+
+const invokeSupportFunction = (fn: SupportCodeFunction, args: ReadonlyArray<unknown>): StepEffect =>
   Effect.suspend(() => {
-    const args = [
-      ...prepared.args.map((arg) => arg.getValue(null)),
-      ...(prepared.dataTable === undefined ? [] : [DataTable.from(prepared.dataTable)]),
-      ...(prepared.docString === undefined ? [] : [prepared.docString.content]),
-    ]
-    const returned: unknown = prepared.fn(...args)
+    const returned: unknown = fn(...args)
     if (isStepEffect(returned)) {
       return returned
     }
     if (isPromiseLike(returned)) {
       return Effect.promise(() => returned)
     }
-    return Effect.succeed(isStepReturn(returned) ? returned : undefined)
+    if (isStepReturn(returned)) {
+      return Effect.succeed(returned)
+    }
+    return Effect.die(new TypeError(
+      isGenerator(returned)
+        ? "Support code returned a Generator. Use an Effect generator body so the DSL can lift it before execution."
+        : `Unsupported support code return value: ${String(returned)}`,
+    ))
   })
 
 const isStepEffect = (value: unknown): value is StepEffect => Effect.isEffect(value)
@@ -228,6 +328,14 @@ const isPromiseLike = (value: unknown): value is Promise<void | "pending" | "ski
 
 const isStepReturn = (value: unknown): value is StepReturn =>
   value === undefined || value === "pending" || value === "skipped"
+
+const isGenerator = (value: unknown) =>
+  typeof value === "object" &&
+  value !== null &&
+  "next" in value &&
+  typeof value.next === "function" &&
+  "throw" in value &&
+  typeof value.throw === "function"
 
 const resultFromCause = (cause: Cause.Cause<StepError>): Omit<TestStepResult, "duration"> => {
   const error = Cause.findErrorOption(cause)
@@ -252,9 +360,10 @@ const resultFromCause = (cause: Cause.Cause<StepError>): Omit<TestStepResult, "d
     }
   }
   const squashed = Cause.squash(cause)
+  const message = squashed instanceof Error ? squashed.message : String(squashed)
   return {
     status: TestStepResultStatus.FAILED,
-    message: String(squashed),
+    message,
     exception: exceptionFromUnknown(squashed),
   }
 }

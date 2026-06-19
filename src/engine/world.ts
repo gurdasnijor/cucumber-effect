@@ -4,9 +4,10 @@ import {
   type Attachment,
   type TestStepStarted,
 } from "@cucumber/messages"
-import { Clock, Context, Effect, Layer, Ref } from "effect"
+import { Clock, Context, Effect, FileSystem, Layer, Ref } from "effect"
 
 type ActiveStep = Pick<TestStepStarted, "testCaseStartedId" | "testStepId">
+type ActiveAttachmentTarget = ActiveStep | { readonly testRunHookStartedId: string }
 
 export class ActiveStepContext extends Context.Service<ActiveStepContext, {
   readonly set: (active: ActiveStep) => Effect.Effect<void>
@@ -18,6 +19,15 @@ export class ActiveStepContext extends Context.Service<ActiveStepContext, {
 
   static readonly layerFor = (active: ActiveStep | undefined) =>
     Layer.effect(this, makeActiveStepContext(active))
+}
+
+export class ScenarioWorld extends Context.Service<ScenarioWorld, {
+  readonly get: <A = unknown>(key: string) => Effect.Effect<A | undefined>
+  readonly set: (key: string, value: unknown) => Effect.Effect<void>
+}>()("cucumber-effect/engine/world/ScenarioWorld") {
+  static get layer() {
+    return Layer.effect(this, makeScenarioWorld)
+  }
 }
 
 export class Attachments extends Context.Service<Attachments, {
@@ -34,7 +44,7 @@ export class Attachments extends Context.Service<Attachments, {
     return this.layerFor(undefined)
   }
 
-  static readonly layerFor = (active: ActiveStep | undefined) =>
+  static readonly layerFor = (active: ActiveAttachmentTarget | undefined) =>
     Layer.effect(this, makeAttachments(active))
 }
 
@@ -47,7 +57,19 @@ const makeActiveStepContext = (active: ActiveStep | undefined) =>
     })
   })
 
-const makeAttachments = (active: ActiveStep | undefined) =>
+const makeScenarioWorld = Effect.gen(function* () {
+  const ref = yield* Ref.make<Readonly<Record<string, unknown>>>({})
+  return ScenarioWorld.of({
+    get: Effect.fn("ScenarioWorld.get")(function* (key: string) {
+      const world = yield* Ref.get(ref)
+      return world[key]
+    }) as <A = unknown>(key: string) => Effect.Effect<A | undefined>,
+    set: Effect.fn("ScenarioWorld.set")((key: string, value: unknown) =>
+      Ref.update(ref, (world) => ({ ...world, [key]: value }))),
+  })
+})
+
+const makeAttachments = (active: ActiveAttachmentTarget | undefined) =>
   Effect.gen(function* () {
     const ref = yield* Ref.make<ReadonlyArray<Attachment>>([])
     const store = Effect.fn("Attachments.store")((attachment: Attachment) =>
@@ -67,9 +89,7 @@ const makeAttachments = (active: ActiveStep | undefined) =>
           mediaType,
           timestamp,
           ...(options?.fileName === undefined ? {} : { fileName: options.fileName }),
-          ...(active === undefined
-            ? {}
-            : { testCaseStartedId: active.testCaseStartedId, testStepId: active.testStepId }),
+          ...activeAttachmentFields(active),
         }
         return yield* store(attachment)
       }),
@@ -80,9 +100,7 @@ const makeAttachments = (active: ActiveStep | undefined) =>
           contentEncoding: AttachmentContentEncoding.IDENTITY,
           mediaType,
           timestamp,
-          ...(active === undefined
-            ? {}
-            : { testCaseStartedId: active.testCaseStartedId, testStepId: active.testStepId }),
+          ...activeAttachmentFields(active),
         })
       }),
       log: Effect.fn("Attachments.log")(function* (body: string) {
@@ -92,20 +110,36 @@ const makeAttachments = (active: ActiveStep | undefined) =>
           contentEncoding: AttachmentContentEncoding.IDENTITY,
           mediaType: "text/x.cucumber.log+plain",
           timestamp,
-          ...(active === undefined
-            ? {}
-            : { testCaseStartedId: active.testCaseStartedId, testStepId: active.testStepId }),
+          ...activeAttachmentFields(active),
         })
       }),
       collect: Ref.get(ref),
     })
   })
 
+const activeAttachmentFields = (active: ActiveAttachmentTarget | undefined) => {
+  if (active === undefined) {
+    return {}
+  }
+  return "testRunHookStartedId" in active
+    ? { testRunHookStartedId: active.testRunHookStartedId }
+    : { testCaseStartedId: active.testCaseStartedId, testStepId: active.testStepId }
+}
+
 export const worldLayer = (active: ActiveStep | undefined = undefined) =>
   Layer.mergeAll(
+    ScenarioWorld.layer,
     ActiveStepContext.layerFor(active),
     Attachments.layerFor(active),
   )
+
+export const provideScenarioWorld = <A, E, R>(
+  effect: Effect.Effect<A, E, R | ScenarioWorld>,
+): Effect.Effect<A, E, Exclude<R, ScenarioWorld>> =>
+  Effect.gen(function* () {
+    const world = yield* makeScenarioWorld
+    return yield* effect.pipe(Effect.provideService(ScenarioWorld, world))
+  }) as Effect.Effect<A, E, Exclude<R, ScenarioWorld>>
 
 export const provideStepWorld = Effect.fn("provideStepWorld")(function*<A, E, R>(
   effect: Effect.Effect<A, E, R>,
@@ -116,6 +150,20 @@ export const provideStepWorld = Effect.fn("provideStepWorld")(function*<A, E, R>
   return yield* effect.pipe(
     Effect.provideService(ActiveStepContext, activeStepContext),
     Effect.provideService(Attachments, attachments),
+  )
+})
+
+export const provideTestRunHookWorld = Effect.fn("provideTestRunHookWorld")(function*<A, E, R>(
+  effect: Effect.Effect<A, E, R>,
+  active: { readonly testRunHookStartedId: string },
+) {
+  const activeStepContext = yield* makeActiveStepContext(undefined)
+  const attachments = yield* makeAttachments(active)
+  const world = yield* makeScenarioWorld
+  return yield* effect.pipe(
+    Effect.provideService(ActiveStepContext, activeStepContext),
+    Effect.provideService(Attachments, attachments),
+    Effect.provideService(ScenarioWorld, world),
   )
 })
 
@@ -133,7 +181,24 @@ export const log = Effect.fn("log")(function* (body: string) {
   return yield* attachments.log(body)
 })
 
+export const link = Effect.fn("link")(function* (url: string, mediaType?: string) {
+  const attachments = yield* Attachments
+  return yield* attachments.link(url, mediaType)
+})
+
 export const collectAttachments = Effect.fn("collectAttachments")(function* () {
   const attachments = yield* Attachments
   return yield* attachments.collect
 })
+
+export const getWorld = Effect.fn("getWorld")(function*<A = unknown>(key: string) {
+  const world = yield* ScenarioWorld
+  return yield* world.get<A>(key)
+})
+
+export const setWorld = Effect.fn("setWorld")(function* (key: string, value: unknown) {
+  const world = yield* ScenarioWorld
+  return yield* world.set(key, value)
+})
+
+export type WorldServices = ActiveStepContext | Attachments | ScenarioWorld | FileSystem.FileSystem
