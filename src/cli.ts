@@ -25,24 +25,24 @@ const config = {
 
 type CliInput = Command.Command.Config.Infer<typeof config>
 
-export class MessageStreamError extends Schema.TaggedErrorClass<MessageStreamError>()(
+class MessageStreamError extends Schema.TaggedErrorClass<MessageStreamError>()(
   "MessageStreamError",
   { error: Schema.Unknown },
 ) {}
 
-export const renderMessagesAsNdjson = Effect.fn("renderMessagesAsNdjson")((envelopes: ReadonlyArray<Envelope>) =>
+const renderMessagesAsNdjson = Effect.fn("renderMessagesAsNdjson")((envelopes: ReadonlyArray<Envelope>) =>
   NodeStream.toString(
     () => Readable.from(envelopes, { objectMode: true }).pipe(new MessageToNdjsonStream()),
     { onError: (error) => new MessageStreamError({ error }) },
   ))
 
-export const runCli = Effect.fn("runCli")(function* (input: CliInput) {
+const runCli = Effect.fn("runCli")(function* (input: CliInput) {
   const envelopes = yield* runFeaturesToArray(input.paths, runOptions(input))
   const ndjson = yield* renderMessagesAsNdjson(envelopes)
   yield* writeStdout(ndjson)
 })
 
-export const cliCommand = Command.make("cucumber-effect", config, runCli).pipe(
+const cliCommand = Command.make("cucumber-effect", config, runCli).pipe(
   Command.withDescription("Run Cucumber feature files and emit Cucumber message NDJSON."),
   Command.withExamples([{
     command: "cucumber-effect features/example.feature --format ndjson",

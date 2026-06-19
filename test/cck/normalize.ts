@@ -9,7 +9,7 @@ import { Readable } from "node:stream"
 // source-reference paths, and the fixture repo's "samples/" path convention.
 type Json = undefined | null | boolean | number | string | Json[] | { readonly [key: string]: Json }
 
-export class NdjsonMessageStreamError extends Schema.TaggedErrorClass<NdjsonMessageStreamError>()(
+class NdjsonMessageStreamError extends Schema.TaggedErrorClass<NdjsonMessageStreamError>()(
   "NdjsonMessageStreamError",
   { error: Schema.Unknown },
 ) {}

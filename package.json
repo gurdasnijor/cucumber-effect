@@ -15,30 +15,28 @@
     "typecheck": "tsc --noEmit",
     "diagnostics": "effect-language-service diagnostics --project tsconfig.json --strict",
     "lint": "effect-language-service diagnostics --project tsconfig.json --strict",
+    "lint:dead": "knip",
     "test": "vitest run",
     "cck": "vitest run test/cck/cck.test.ts"
   },
   "dependencies": {
     "@cucumber/compatibility-kit": "29.2.2",
-    "@cucumber/ci-environment": "14.0.0",
     "@cucumber/core": "0.9.0",
     "@cucumber/cucumber-expressions": "20.0.0",
     "@cucumber/gherkin": "40.0.0",
     "@cucumber/gherkin-streams": "7.0.0",
-    "@cucumber/gherkin-utils": "12.0.0",
     "@cucumber/message-streams": "5.0.0",
     "@cucumber/messages": "33.0.2",
     "@cucumber/query": "16.0.0",
     "@cucumber/tag-expressions": "10.0.0",
     "@effect/platform-node": "4.0.0-beta.84",
-    "effect": "4.0.0-beta.84",
-    "globby": "16.2.0",
-    "stack-utils": "2.0.6"
+    "effect": "4.0.0-beta.84"
   },
   "devDependencies": {
-    "@effect/vitest": "4.0.0-beta.84",
     "@effect/language-service": "0.86.2",
+    "@effect/vitest": "4.0.0-beta.84",
     "@types/node": "24.0.3",
+    "knip": "6.3.0",
     "typescript": "5.8.3",
     "vitest": "3.2.4"
   }
