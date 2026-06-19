@@ -60,7 +60,7 @@ const normalizeValue = (
   }
   if ("sourceReference" in value) {
     const entries = Object.entries(value).filter(([entryKey, entryValue]) =>
-      entryKey !== "sourceReference" && entryValue !== undefined)
+      entryKey !== "sourceReference" && entryKey !== "stackTrace" && entryValue !== undefined)
     return Object.fromEntries(entries.map(([entryKey, entryValue]) => [
       entryKey,
       normalizeValue(entryValue, remap, entryKey),
@@ -68,7 +68,7 @@ const normalizeValue = (
   }
 
   return Object.fromEntries(Object.entries(value)
-    .filter(([, entryValue]) => entryValue !== undefined)
+    .filter(([entryKey, entryValue]) => entryKey !== "stackTrace" && entryValue !== undefined)
     .map(([entryKey, entryValue]) => [
       entryKey,
       normalizeValue(entryValue, remap, entryKey),

@@ -1,32 +1,34 @@
 import {
+  DataTable,
+  makeTestPlan,
+  type AssembledTestCase,
+  type AssembledTestStep,
+  type DefinedTestRunHook,
+  type PreparedStep,
+  type SupportCodeFunction,
+  type SupportCodeLibrary,
+} from "@cucumber/core"
+import {
   TestStepResultStatus,
   TimeConversion,
   type Attachment,
   type Envelope,
   type Exception,
+  type GherkinDocument,
   type IdGenerator,
   type Pickle,
-  type TestCase,
-  type TestStep,
   type TestStepResult,
 } from "@cucumber/messages"
-import { Cause, Clock, Effect, Exit, Option } from "effect"
+import { Cause, Clock, Effect, Exit, FileSystem, Option } from "effect"
 import { type StepError } from "./errors.ts"
-import { Registry, makeDataTable, type RegisteredSupportStepDefinition, type ResolvedStep } from "./registry.ts"
-import { collectAttachments, provideStepWorld } from "./world.ts"
-
-type AssembledStep = {
-  readonly pickleStep: Pickle["steps"][number]
-  readonly testStep: TestStep
-  readonly resolved?: ResolvedStep
-  readonly status?: TestStepResultStatus.UNDEFINED | TestStepResultStatus.AMBIGUOUS
-}
-
-type AssembledTestCase = {
-  readonly pickle: Pickle
-  readonly testCase: TestCase
-  readonly steps: ReadonlyArray<AssembledStep>
-}
+import {
+  collectAttachments,
+  provideScenarioWorld,
+  provideStepWorld,
+  provideTestRunHookWorld,
+  type ScenarioWorld,
+  type WorldServices,
+} from "./world.ts"
 
 type ScenarioResult = {
   readonly statuses: ReadonlyArray<TestStepResultStatus>
@@ -37,6 +39,10 @@ type StepExecution = {
   readonly result: TestStepResult
   readonly attachments: ReadonlyArray<Attachment>
 }
+
+type StepReturn = void | "pending" | "skipped"
+
+type StepEffect = Effect.Effect<StepReturn, StepError, WorldServices>
 
 type ScenarioAttemptState = {
   readonly statuses: ReadonlyArray<TestStepResultStatus>
@@ -52,154 +58,42 @@ const NON_SUCCESS_STATUSES = new Set<TestStepResultStatus>([
   TestStepResultStatus.FAILED,
 ])
 
-export const emitStepDefinitions = Effect.fn("emitStepDefinitions")(function* (nextId: IdGenerator.NewId) {
-  const registry = yield* Registry
-  const parameterTypes = registry.parameterTypes.map((parameterType): Envelope => ({
-    parameterType: {
-      id: nextId(),
-      name: parameterType.name,
-      regularExpressions: toRegularExpressionSources(parameterType.regexp),
-      preferForRegularExpressionMatch: parameterType.preferForRegexpMatch ?? false,
-      useForSnippets: parameterType.useForSnippets ?? true,
-    },
-  }))
+export const supportCodeEnvelopes = (supportCodeLibrary: SupportCodeLibrary) =>
+  supportCodeLibrary.toEnvelopes()
 
-  const entries = registry.definitions.map((definition) => {
-    const id = nextId()
-    return {
-      definition,
-      id,
-      envelope: {
-        stepDefinition: {
-          id,
-          pattern: {
-            type: definition.patternType,
-            source: definition.patternSource,
-          },
-          sourceReference: definition.sourceReference ?? {},
-        },
-      },
-    } satisfies { readonly definition: RegisteredSupportStepDefinition; readonly id: string; readonly envelope: Envelope }
-  })
-  return {
-    stepDefinitionIds: entries.map((entry) => entry.id),
-    envelopes: [
-      ...parameterTypes,
-      ...entries.map((entry) => entry.envelope),
-    ],
-  }
-})
-
-const toRegularExpressionSources = (regexp: string | RegExp | ReadonlyArray<string | RegExp>) => {
-  const values = Array.isArray(regexp) ? regexp : [regexp]
-  return values.map((value) => typeof value === "string" ? value : value.source)
-}
-
-export const assembleTestCases = Effect.fn("assembleTestCases")(function* (
+export const assembleTestCases = (
   nextId: IdGenerator.NewId,
   testRunStartedId: string,
+  supportCodeLibrary: SupportCodeLibrary,
+  gherkinDocuments: ReadonlyArray<GherkinDocument>,
   pickles: ReadonlyArray<Pickle>,
-  stepDefinitionIds: ReadonlyArray<string>,
-) {
-  return yield* Effect.forEach(
-    pickles,
-    (pickle) => assembleTestCase(nextId, testRunStartedId, pickle, stepDefinitionIds),
-    { concurrency: 1 },
-  )
-})
-
-const assembleTestCase = Effect.fn("assembleTestCase")(function* (
-  nextId: IdGenerator.NewId,
-  testRunStartedId: string,
-  pickle: Pickle,
-  stepDefinitionIds: ReadonlyArray<string>,
-) {
-  const steps = yield* Effect.forEach(
-    pickle.steps,
-    (pickleStep) => assembleTestStep(nextId, pickleStep, stepDefinitionIds),
-    { concurrency: 1 },
-  )
-  return {
-    pickle,
-    testCase: {
-      id: nextId(),
-      pickleId: pickle.id,
-      testSteps: steps.map((step) => step.testStep),
+): ReadonlyArray<AssembledTestCase> =>
+  gherkinDocuments.flatMap((gherkinDocument) =>
+    makeTestPlan({
       testRunStartedId,
-    },
-    steps,
-  }
-})
-
-const assembleTestStep = Effect.fn("assembleTestStep")(function* (
-  nextId: IdGenerator.NewId,
-  pickleStep: Pickle["steps"][number],
-  stepDefinitionIds: ReadonlyArray<string>,
-): Effect.fn.Return<AssembledStep, never, Registry> {
-  const registry = yield* Registry
-  const testStepId = nextId()
-  const candidates = yield* registry.match(pickleStep.text)
-  if (candidates.length === 0) {
-    return {
-      pickleStep,
-      testStep: {
-        id: testStepId,
-        pickleStepId: pickleStep.id,
-        stepDefinitionIds: [],
-        stepMatchArgumentsLists: [],
-      },
-      status: TestStepResultStatus.UNDEFINED,
-    }
-  }
-  if (candidates.length > 1) {
-    return {
-      pickleStep,
-      testStep: {
-        id: testStepId,
-        pickleStepId: pickleStep.id,
-        stepDefinitionIds: candidates.flatMap((candidate) => {
-          const definitionId = stepDefinitionIds[candidate.definitionIndex]
-          return definitionId === undefined ? [] : [definitionId]
-        }),
-        stepMatchArgumentsLists: candidates.map((candidate) => ({
-          stepMatchArguments: candidate.matchArguments,
-        })),
-      },
-      status: TestStepResultStatus.AMBIGUOUS,
-    }
-  }
-
-  const resolved = candidates[0] as ResolvedStep
-  const definitionId = stepDefinitionIds[resolved.definitionIndex]
-  return {
-    pickleStep,
-    testStep: {
-      id: testStepId,
-      pickleStepId: pickleStep.id,
-      stepDefinitionIds: definitionId === undefined ? [] : [definitionId],
-      stepMatchArgumentsLists: [{ stepMatchArguments: resolved.matchArguments }],
-    },
-    resolved,
-  }
-})
+      gherkinDocument,
+      pickles: pickles.filter((pickle) => pickle.uri === gherkinDocument.uri),
+      supportCodeLibrary,
+    }, { newId: nextId }).testCases
+  )
 
 export const runScenario = Effect.fn("runScenario")(function* (
   nextId: IdGenerator.NewId,
   assembled: AssembledTestCase,
   attempt: number,
-): Effect.fn.Return<ScenarioResult> {
+): Effect.fn.Return<ScenarioResult, never, FileSystem.FileSystem> {
   const testCaseStartedId = nextId()
   const timestamp = TimeConversion.millisecondsSinceEpochToTimestamp(yield* Clock.currentTimeMillis)
   const testCaseStarted: Envelope = {
     testCaseStarted: {
       id: testCaseStartedId,
-      testCaseId: assembled.testCase.id,
+      testCaseId: assembled.id,
       timestamp,
       attempt,
     },
   }
 
-  const result = yield* runScenarioAttempt(assembled, testCaseStartedId)
+  const result = yield* provideScenarioWorld(runScenarioAttempt(assembled, testCaseStartedId))
 
   const testCaseFinished: Envelope = {
     testCaseFinished: {
@@ -219,6 +113,75 @@ export const runScenario = Effect.fn("runScenario")(function* (
   }
 })
 
+export const runTestRunHooks = Effect.fn("runTestRunHooks")(function* (
+  nextId: IdGenerator.NewId,
+  testRunStartedId: string,
+  hooks: ReadonlyArray<DefinedTestRunHook>,
+): Effect.fn.Return<ScenarioResult, never, FileSystem.FileSystem> {
+  const results = yield* Effect.forEach(
+    hooks,
+    (hook) => runTestRunHook(nextId, testRunStartedId, hook),
+    { concurrency: 1 },
+  )
+  return {
+    statuses: results.map((result) => result.status),
+    envelopes: results.flatMap((result) => result.envelopes),
+  }
+})
+
+const runTestRunHook = Effect.fn("runTestRunHook")(function* (
+  nextId: IdGenerator.NewId,
+  testRunStartedId: string,
+  hook: DefinedTestRunHook,
+) {
+  const testRunHookStartedId = nextId()
+  const testRunHookStarted: Envelope = {
+    testRunHookStarted: {
+      id: testRunHookStartedId,
+      testRunStartedId,
+      hookId: hook.id,
+      timestamp: TimeConversion.millisecondsSinceEpochToTimestamp(yield* Clock.currentTimeMillis),
+    },
+  }
+  const started = yield* Clock.currentTimeMillis
+  const execution = yield* Effect.gen(function* () {
+    const exit = yield* invokeSupportFunction(hook.fn, []).pipe(Effect.exit)
+    const attachments = yield* collectAttachments()
+    return { exit, attachments }
+  }).pipe((effect) => provideTestRunHookWorld(effect, { testRunHookStartedId }))
+  const ended = yield* Clock.currentTimeMillis
+  const duration = TimeConversion.millisecondsToDuration(ended - started)
+  const result = Exit.match(execution.exit, {
+    onSuccess: (value): TestStepResult => ({
+      status: value === "pending"
+        ? TestStepResultStatus.PENDING
+        : value === "skipped"
+          ? TestStepResultStatus.SKIPPED
+          : TestStepResultStatus.PASSED,
+      duration,
+    }),
+    onFailure: (cause): TestStepResult => ({
+      ...resultFromCause(cause),
+      duration,
+    }),
+  })
+  const testRunHookFinished: Envelope = {
+    testRunHookFinished: {
+      testRunHookStartedId,
+      result,
+      timestamp: TimeConversion.millisecondsSinceEpochToTimestamp(yield* Clock.currentTimeMillis),
+    },
+  }
+  return {
+    status: result.status,
+    envelopes: [
+      testRunHookStarted,
+      ...execution.attachments.map((attachment): Envelope => ({ attachment })),
+      testRunHookFinished,
+    ],
+  }
+})
+
 const runScenarioAttempt = Effect.fn("runScenarioAttempt")(function* (
   assembled: AssembledTestCase,
   testCaseStartedId: string,
@@ -230,28 +193,30 @@ const runScenarioAttempt = Effect.fn("runScenarioAttempt")(function* (
     skipped: false,
   }
 
-  return yield* assembled.steps.reduce(
+  return yield* assembled.testSteps.reduce(
     (effect, step) => effect.pipe(Effect.flatMap((state) => runScenarioStep(state, step, testCaseStartedId))),
-    Effect.succeed(initial),
+    Effect.succeed(initial) as Effect.Effect<ScenarioAttemptState, never, ScenarioWorld | FileSystem.FileSystem>,
   )
 })
 
 const runScenarioStep = Effect.fn("runScenarioStep")(function* (
   state: ScenarioAttemptState,
-  step: AssembledStep,
+  step: AssembledTestStep,
   testCaseStartedId: string,
-): Effect.fn.Return<ScenarioAttemptState> {
+): Effect.fn.Return<ScenarioAttemptState, never, ScenarioWorld | FileSystem.FileSystem> {
   const testStepStarted: Envelope = {
     testStepStarted: {
       testCaseStartedId,
-      testStepId: step.testStep.id,
+      testStepId: step.id,
       timestamp: TimeConversion.millisecondsSinceEpochToTimestamp(yield* Clock.currentTimeMillis),
     },
   }
 
-  const execution = state.failedish || state.skipped
+  const execution = state.skipped && !step.always
     ? { result: zeroDurationResult(TestStepResultStatus.SKIPPED), attachments: [] }
-    : yield* executeStep(step, { testCaseStartedId, testStepId: step.testStep.id })
+    : state.failedish && !step.always
+      ? executeStepAfterFailure(step)
+      : yield* executeStep(step, { testCaseStartedId, testStepId: step.id })
 
   const result = execution.result
   const skipped = state.skipped || (result.status === TestStepResultStatus.SKIPPED && !state.failedish)
@@ -261,7 +226,7 @@ const runScenarioStep = Effect.fn("runScenarioStep")(function* (
   const testStepFinished: Envelope = {
     testStepFinished: {
       testCaseStartedId,
-      testStepId: step.testStep.id,
+      testStepId: step.id,
       testStepResult: result,
       timestamp: TimeConversion.millisecondsSinceEpochToTimestamp(yield* Clock.currentTimeMillis),
     },
@@ -281,20 +246,20 @@ const runScenarioStep = Effect.fn("runScenarioStep")(function* (
 })
 
 const executeStep = Effect.fn("executeStep")(function* (
-  step: AssembledStep,
+  step: AssembledTestStep,
   active: { readonly testCaseStartedId: string; readonly testStepId: string },
-): Effect.fn.Return<StepExecution> {
-  if (step.status !== undefined) {
-    return { result: zeroDurationResult(step.status), attachments: [] }
-  }
-  if (step.resolved === undefined) {
+): Effect.fn.Return<StepExecution, never, ScenarioWorld | FileSystem.FileSystem> {
+  const prepared = step.prepare()
+  if (prepared.type === "undefined") {
     return { result: zeroDurationResult(TestStepResultStatus.UNDEFINED), attachments: [] }
   }
+  if (prepared.type === "ambiguous") {
+    return { result: zeroDurationResult(TestStepResultStatus.AMBIGUOUS), attachments: [] }
+  }
 
-  const resolved = step.resolved
   const started = yield* Clock.currentTimeMillis
   const execution = yield* Effect.gen(function* () {
-    const exit = yield* invokeStep(resolved, step.pickleStep).pipe(Effect.exit)
+    const exit = yield* invokeStep(prepared).pipe(Effect.exit)
     const attachments = yield* collectAttachments()
     return { exit, attachments }
   }).pipe((effect) => provideStepWorld(effect, active))
@@ -319,23 +284,58 @@ const executeStep = Effect.fn("executeStep")(function* (
   return { result, attachments: execution.attachments }
 })
 
-const invokeStep = (
-  resolved: ResolvedStep,
-  pickleStep: Pickle["steps"][number],
-) => {
-  const dataTable = pickleStep.argument?.dataTable === undefined
-    ? undefined
-    : makeDataTable(pickleStep.argument.dataTable.rows.map((row) => row.cells.map((cell) => cell.value)))
-  const docString = pickleStep.argument?.docString?.content
-  const args = [
-    ...resolved.args,
-    ...(dataTable === undefined ? [] : [dataTable]),
-    ...(docString === undefined ? [] : [docString]),
-  ]
-  return Effect.sync(() => resolved.definition.implementation(...args)).pipe(
-    Effect.flatMap((returned) => Effect.isEffect(returned) ? returned : Effect.succeed(returned)),
-  )
+const executeStepAfterFailure = (step: AssembledTestStep): StepExecution => {
+  const prepared = step.prepare()
+  if (prepared.type === "undefined") {
+    return { result: zeroDurationResult(TestStepResultStatus.UNDEFINED), attachments: [] }
+  }
+  if (prepared.type === "ambiguous") {
+    return { result: zeroDurationResult(TestStepResultStatus.AMBIGUOUS), attachments: [] }
+  }
+  return { result: zeroDurationResult(TestStepResultStatus.SKIPPED), attachments: [] }
 }
+
+const invokeStep = (prepared: PreparedStep): StepEffect =>
+  invokeSupportFunction(prepared.fn, [
+    ...prepared.args.map((arg) => arg.getValue(null)),
+    ...(prepared.dataTable === undefined ? [] : [DataTable.from(prepared.dataTable)]),
+    ...(prepared.docString === undefined ? [] : [prepared.docString.content]),
+  ])
+
+const invokeSupportFunction = (fn: SupportCodeFunction, args: ReadonlyArray<unknown>): StepEffect =>
+  Effect.suspend(() => {
+    const returned: unknown = fn(...args)
+    if (isStepEffect(returned)) {
+      return returned
+    }
+    if (isPromiseLike(returned)) {
+      return Effect.promise(() => returned)
+    }
+    if (isStepReturn(returned)) {
+      return Effect.succeed(returned)
+    }
+    return Effect.die(new TypeError(
+      isGenerator(returned)
+        ? "Support code returned a Generator. Use an Effect generator body so the DSL can lift it before execution."
+        : `Unsupported support code return value: ${String(returned)}`,
+    ))
+  })
+
+const isStepEffect = (value: unknown): value is StepEffect => Effect.isEffect(value)
+
+const isPromiseLike = (value: unknown): value is Promise<void | "pending" | "skipped"> =>
+  typeof value === "object" && value !== null && "then" in value && typeof value.then === "function"
+
+const isStepReturn = (value: unknown): value is StepReturn =>
+  value === undefined || value === "pending" || value === "skipped"
+
+const isGenerator = (value: unknown) =>
+  typeof value === "object" &&
+  value !== null &&
+  "next" in value &&
+  typeof value.next === "function" &&
+  "throw" in value &&
+  typeof value.throw === "function"
 
 const resultFromCause = (cause: Cause.Cause<StepError>): Omit<TestStepResult, "duration"> => {
   const error = Cause.findErrorOption(cause)
@@ -360,9 +360,10 @@ const resultFromCause = (cause: Cause.Cause<StepError>): Omit<TestStepResult, "d
     }
   }
   const squashed = Cause.squash(cause)
+  const message = squashed instanceof Error ? squashed.message : String(squashed)
   return {
     status: TestStepResultStatus.FAILED,
-    message: String(squashed),
+    message,
     exception: exceptionFromUnknown(squashed),
   }
 }

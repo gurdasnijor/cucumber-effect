@@ -2,21 +2,20 @@ import { NodeStream } from "@effect/platform-node"
 import { GherkinStreams, type IGherkinStreamOptions } from "@cucumber/gherkin-streams"
 import {
   IdGenerator,
-  TestStepResultStatus,
   TimeConversion,
   type Envelope,
 } from "@cucumber/messages"
-import { Effect, Stream } from "effect"
+import { Effect, FileSystem, Stream } from "effect"
 import { GherkinStreamError } from "./errors.ts"
-import type { Registry } from "./registry.ts"
-import { assembleTestCases, emitStepDefinitions, runScenario, testRunSuccess } from "./scenario.ts"
+import { Registry } from "./registry.ts"
+import { assembleTestCases, runScenario, runTestRunHooks, supportCodeEnvelopes, testRunSuccess } from "./scenario.ts"
 
 export type RunFeaturesOptions = Pick<IGherkinStreamOptions, "relativeTo">
 
 export const runFeatures = (
   paths: ReadonlyArray<string>,
   options: RunFeaturesOptions = {},
-): Stream.Stream<Envelope, GherkinStreamError, Registry> =>
+): Stream.Stream<Envelope, GherkinStreamError, Registry | FileSystem.FileSystem> =>
   Stream.fromIterableEffect(runFeaturesToArray(paths, options))
 
 export const runFeaturesToArray = Effect.fn("runFeaturesToArray")(function* (
@@ -33,8 +32,10 @@ const runFeaturePlan = Effect.fn("runFeaturePlan")(function* (
   options: RunFeaturesOptions,
 ) {
   const parsed = yield* gherkinEnvelopesFromPaths(paths, nextId, options)
+  const registry = yield* Registry
+  const supportCodeLibrary = registry.buildSupportCodeLibrary(nextId)
 
-  const stepDefinitions = yield* emitStepDefinitions(nextId)
+  const supportEnvelopes = supportCodeEnvelopes(supportCodeLibrary)
   const testRunStartedId = nextId()
   const testRunStarted: Envelope = {
     testRunStarted: {
@@ -43,13 +44,22 @@ const runFeaturePlan = Effect.fn("runFeaturePlan")(function* (
     },
   }
 
-  const testCases = yield* assembleTestCases(nextId, testRunStartedId, parsed.pickles, stepDefinitions.stepDefinitionIds)
-  const scenarioResults = yield* Effect.forEach(
-    testCases,
-    (testCase) => runScenario(nextId, testCase, 0),
-    { concurrency: 1 },
-  )
-  const statuses = scenarioResults.flatMap((result) => result.statuses)
+  const testCases = assembleTestCases(nextId, testRunStartedId, supportCodeLibrary, parsed.gherkinDocuments, parsed.pickles)
+  const beforeAllResult = yield* runTestRunHooks(nextId, testRunStartedId, supportCodeLibrary.getAllBeforeAllHooks())
+  const shouldRunTestCases = testRunSuccess(beforeAllResult.statuses)
+  const scenarioResults = shouldRunTestCases
+    ? yield* Effect.forEach(
+      testCases,
+      (testCase) => runScenario(nextId, testCase, 0),
+      { concurrency: 1 },
+    )
+    : []
+  const afterAllResult = yield* runTestRunHooks(nextId, testRunStartedId, [...supportCodeLibrary.getAllAfterAllHooks()].reverse())
+  const statuses = [
+    ...beforeAllResult.statuses,
+    ...scenarioResults.flatMap((result) => result.statuses),
+    ...afterAllResult.statuses,
+  ]
 
   const testRunFinished: Envelope = {
     testRunFinished: {
@@ -61,10 +71,12 @@ const runFeaturePlan = Effect.fn("runFeaturePlan")(function* (
 
   return [
     ...parsed.envelopes,
-    ...stepDefinitions.envelopes,
+    ...supportEnvelopes,
     testRunStarted,
-    ...testCases.map((testCase): Envelope => ({ testCase: testCase.testCase })),
+    ...beforeAllResult.envelopes,
+    ...(shouldRunTestCases ? testCases.map((testCase): Envelope => ({ testCase: testCase.toMessage() })) : []),
     ...scenarioResults.flatMap((result) => result.envelopes),
+    ...afterAllResult.envelopes,
     testRunFinished,
   ]
 })
@@ -85,7 +97,8 @@ const gherkinEnvelopesFromPaths = Effect.fn("gherkinEnvelopesFromPaths")(functio
     evaluate: () => GherkinStreams.fromPaths(paths, gherkinOptions),
     onError: (error) => new GherkinStreamError({ error }),
   }).pipe(Stream.runCollect)
+  const gherkinDocuments = envelopes.flatMap((envelope) => envelope.gherkinDocument === undefined ? [] : [envelope.gherkinDocument])
   const pickles = envelopes.flatMap((envelope) => envelope.pickle === undefined ? [] : [envelope.pickle])
 
-  return { envelopes, pickles }
+  return { envelopes, gherkinDocuments, pickles }
 })

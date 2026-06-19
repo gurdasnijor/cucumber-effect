@@ -21,6 +21,7 @@
   "dependencies": {
     "@cucumber/compatibility-kit": "29.2.2",
     "@cucumber/ci-environment": "14.0.0",
+    "@cucumber/core": "0.9.0",
     "@cucumber/cucumber-expressions": "20.0.0",
     "@cucumber/gherkin": "40.0.0",
     "@cucumber/gherkin-streams": "7.0.0",
