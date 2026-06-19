@@ -18,7 +18,7 @@ import {
   type Pickle,
   type TestStepResult,
 } from "@cucumber/messages"
-import { Cause, Clock, Effect, Exit, FileSystem, Option } from "effect"
+import { Cause, Clock, Effect, Exit, FileSystem, Option, Ref, Schedule } from "effect"
 import { type StepError } from "./errors.ts"
 import {
   collectAttachments,
@@ -33,6 +33,10 @@ import { makeSnippets } from "./snippets.ts"
 type ScenarioResult = {
   readonly statuses: ReadonlyArray<TestStepResultStatus>
   readonly envelopes: ReadonlyArray<Envelope>
+}
+
+type ScenarioAttemptResult = ScenarioResult & {
+  readonly testCaseStartedId: string
 }
 
 type StepExecution = {
@@ -83,28 +87,42 @@ export const runScenario = Effect.fn("runScenario")(function* (
   supportCodeLibrary: SupportCodeLibrary,
   allowedRetries: number,
 ): Effect.fn.Return<ScenarioResult, never, FileSystem.FileSystem> {
-  const allowedAttempts = allowedRetries + 1
-  const accumulated: Array<Envelope> = []
-  let statuses: ReadonlyArray<TestStepResultStatus> = []
-
-  for (let attempt = 0; attempt < allowedAttempts; attempt++) {
-    const attemptResult = yield* runScenarioAttemptWithEnvelopes(nextId, assembled, supportCodeLibrary, attempt)
-    const willBeRetried = attemptResult.statuses.includes(TestStepResultStatus.FAILED) && attempt < allowedAttempts - 1
-    const finishedAt = yield* Clock.currentTimeMillis
-    accumulated.push(
-      ...attemptResult.envelopes,
-      testCaseFinishedEnvelope(attemptResult.testCaseStartedId, willBeRetried, finishedAt),
-    )
-    statuses = attemptResult.statuses
-    if (!willBeRetried) {
-      break
-    }
-  }
-
+  const attemptRef = yield* Ref.make(0)
+  const envelopesRef = yield* Ref.make<ReadonlyArray<Envelope>>([])
+  const finalAttempt = yield* runScenarioAttemptForRetry(nextId, assembled, supportCodeLibrary, allowedRetries, attemptRef, envelopesRef)
+    .pipe(Effect.repeat({
+      schedule: Schedule.recurs(allowedRetries),
+      while: shouldRetryScenario,
+    }))
+  const envelopes = yield* Ref.get(envelopesRef)
   return {
-    statuses,
-    envelopes: accumulated,
+    statuses: finalAttempt.statuses,
+    envelopes,
   }
+})
+
+const shouldRetryScenario = (result: ScenarioAttemptResult) =>
+  result.statuses.includes(TestStepResultStatus.FAILED)
+
+const runScenarioAttemptForRetry = Effect.fn("runScenarioAttemptForRetry")(function* (
+  nextId: IdGenerator.NewId,
+  assembled: AssembledTestCase,
+  supportCodeLibrary: SupportCodeLibrary,
+  allowedRetries: number,
+  attemptRef: Ref.Ref<number>,
+  envelopesRef: Ref.Ref<ReadonlyArray<Envelope>>,
+) {
+  const attempt = yield* Ref.get(attemptRef)
+  const attemptResult = yield* runScenarioAttemptWithEnvelopes(nextId, assembled, supportCodeLibrary, attempt)
+  const willBeRetried = shouldRetryScenario(attemptResult) && attempt < allowedRetries
+  const finishedAt = yield* Clock.currentTimeMillis
+  yield* Ref.update(envelopesRef, (envelopes) => [
+    ...envelopes,
+    ...attemptResult.envelopes,
+    testCaseFinishedEnvelope(attemptResult.testCaseStartedId, willBeRetried, finishedAt),
+  ])
+  yield* Ref.update(attemptRef, (current) => current + 1)
+  return attemptResult
 })
 
 const runScenarioAttemptWithEnvelopes = Effect.fn("runScenarioAttemptWithEnvelopes")(function* (
@@ -112,7 +130,7 @@ const runScenarioAttemptWithEnvelopes = Effect.fn("runScenarioAttemptWithEnvelop
   assembled: AssembledTestCase,
   supportCodeLibrary: SupportCodeLibrary,
   attempt: number,
-) {
+): Effect.fn.Return<ScenarioAttemptResult, never, FileSystem.FileSystem> {
   const testCaseStartedId = nextId()
   const timestamp = TimeConversion.millisecondsSinceEpochToTimestamp(yield* Clock.currentTimeMillis)
   const testCaseStarted: Envelope = {
