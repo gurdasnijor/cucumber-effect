@@ -127,6 +127,94 @@ export const cckStepsFor = (sample: string) => {
           throw new Error("whoops")
         })
       })
+    case "global-hooks":
+      return defineSupport(({ AfterAll, BeforeAll, When }) => {
+        BeforeAll({}, () => undefined)
+        BeforeAll({}, () => undefined)
+        When("a step passes", () => undefined)
+        When("a step fails", () => {
+          throw new Error("Exception in step")
+        })
+        AfterAll({}, () => undefined)
+        AfterAll({}, () => undefined)
+      })
+    case "global-hooks-afterall-error":
+      return defineSupport(({ AfterAll, BeforeAll, When }) => {
+        BeforeAll({}, () => undefined)
+        BeforeAll({}, () => undefined)
+        When("a step passes", () => undefined)
+        AfterAll({}, () => undefined)
+        AfterAll({}, () => {
+          throw new Error("AfterAll hook went wrong")
+        })
+        AfterAll({}, () => undefined)
+      })
+    case "global-hooks-attachments":
+      return defineSupport(({ AfterAll, BeforeAll, When }) => {
+        BeforeAll({}, () => attach("Attachment from BeforeAll hook", "text/plain"))
+        When("a step passes", () => undefined)
+        AfterAll({}, () => attach("Attachment from AfterAll hook", "text/plain"))
+      })
+    case "global-hooks-beforeall-error":
+      return defineSupport(({ AfterAll, BeforeAll, When }) => {
+        BeforeAll({}, () => undefined)
+        BeforeAll({}, () => {
+          throw new Error("BeforeAll hook went wrong")
+        })
+        BeforeAll({}, () => undefined)
+        When("a step passes", () => undefined)
+        AfterAll({}, () => undefined)
+        AfterAll({}, () => undefined)
+      })
+    case "hooks":
+      return defineSupport(({ After, Before, When }) => {
+        Before({}, () => undefined)
+        When("a step passes", () => undefined)
+        When("a step fails", () => {
+          throw new Error("Exception in step")
+        })
+        After({}, () => undefined)
+      })
+    case "hooks-attachment":
+      return defineSupport(({ After, Before, When }) => {
+        Before({}, () => attachFixture("hooks-attachment", "cucumber.svg", "image/svg+xml"))
+        When("a step passes", () => undefined)
+        After({}, () => attachFixture("hooks-attachment", "cucumber.svg", "image/svg+xml"))
+      })
+    case "hooks-conditional":
+      return defineSupport(({ After, Before, When }) => {
+        Before({ tags: "@passing-hook" }, () => Promise.resolve())
+        Before({ tags: "@fail-before" }, () => {
+          throw new Error("Exception in conditional hook")
+        })
+        When("a step passes", () => undefined)
+        After({ tags: "@fail-after" }, () => {
+          throw new Error("Exception in conditional hook")
+        })
+        After({ tags: "@passing-hook" }, () => Promise.resolve())
+      })
+    case "hooks-named":
+      return defineSupport(({ After, Before, When }) => {
+        Before({ name: "A named before hook" }, () => undefined)
+        When("a step passes", () => undefined)
+        After({ name: "A named after hook" }, () => undefined)
+      })
+    case "hooks-skipped":
+      return defineSupport(({ After, Before, Given }) => {
+        Before({}, () => undefined)
+        Before({ tags: "@skip-before" }, () => "skipped")
+        Before({}, () => undefined)
+        Given("a normal step", () => undefined)
+        Given("a step that skips", () => "skipped")
+        After({}, () => undefined)
+        After({ tags: "@skip-after" }, () => "skipped")
+        After({}, () => undefined)
+      })
+    case "hooks-undefined":
+      return defineSupport(({ After, Before }) => {
+        Before({}, () => undefined)
+        After({}, () => undefined)
+      })
     case "parameter-types":
       return defineSupport(({ Given, ParameterType }) => {
         ParameterType({
@@ -153,6 +241,13 @@ export const cckStepsFor = (sample: string) => {
         Given("a step that does not skip", () => undefined)
         Given("a step that is skipped", () => undefined)
         Given("I skip a step", () => "skipped")
+      })
+    case "skipped-failing-hook":
+      return defineSupport(({ After, Given }) => {
+        Given("a step that skips", () => "skipped")
+        After({}, () => {
+          throw new Error("whoops")
+        })
       })
     case "regular-expression":
       return defineSupport(({ Given }) => {

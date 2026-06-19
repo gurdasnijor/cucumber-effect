@@ -6,8 +6,26 @@ import {
 } from "@cucumber/messages"
 import { Clock, Context, Effect, FileSystem, Layer, Ref } from "effect"
 
-type ActiveStep = Pick<TestStepStarted, "testCaseStartedId" | "testStepId">
+export type ActiveStep = Pick<TestStepStarted, "testCaseStartedId" | "testStepId">
 type ActiveAttachmentTarget = ActiveStep | { readonly testRunHookStartedId: string }
+
+export type ScenarioRuntime = {
+  readonly provide: <A, E, R>(
+    effect: Effect.Effect<A, E, R | ScenarioWorld>,
+  ) => Effect.Effect<A, E, Exclude<R, ScenarioWorld>>
+}
+
+export type StepRuntime = {
+  readonly provide: <A, E, R>(
+    effect: Effect.Effect<A, E, R | ActiveStepContext | Attachments>,
+  ) => Effect.Effect<A, E, Exclude<R, ActiveStepContext | Attachments>>
+}
+
+export type TestRunHookRuntime = {
+  readonly provide: <A, E, R>(
+    effect: Effect.Effect<A, E, R | ActiveStepContext | Attachments | ScenarioWorld>,
+  ) => Effect.Effect<A, E, Exclude<R, ActiveStepContext | Attachments | ScenarioWorld>>
+}
 
 export class ActiveStepContext extends Context.Service<ActiveStepContext, {
   readonly set: (active: ActiveStep) => Effect.Effect<void>
@@ -133,38 +151,40 @@ export const worldLayer = (active: ActiveStep | undefined = undefined) =>
     Attachments.layerFor(active),
   )
 
-export const provideScenarioWorld = <A, E, R>(
-  effect: Effect.Effect<A, E, R | ScenarioWorld>,
-): Effect.Effect<A, E, Exclude<R, ScenarioWorld>> =>
-  Effect.gen(function* () {
-    const world = yield* makeScenarioWorld
-    return yield* effect.pipe(Effect.provideService(ScenarioWorld, world))
-  }) as Effect.Effect<A, E, Exclude<R, ScenarioWorld>>
-
-export const provideStepWorld = Effect.fn("provideStepWorld")(function*<A, E, R>(
-  effect: Effect.Effect<A, E, R>,
-  active: ActiveStep,
-) {
-  const activeStepContext = yield* makeActiveStepContext(active)
-  const attachments = yield* makeAttachments(active)
-  return yield* effect.pipe(
-    Effect.provideService(ActiveStepContext, activeStepContext),
-    Effect.provideService(Attachments, attachments),
-  )
+export const makeScenarioRuntime = Effect.fn("makeScenarioRuntime")(function* () {
+  const world = yield* makeScenarioWorld
+  return {
+    provide: (<A, E, R>(effect: Effect.Effect<A, E, R | ScenarioWorld>) =>
+      effect.pipe(Effect.provideService(ScenarioWorld, world))) as ScenarioRuntime["provide"],
+  } satisfies ScenarioRuntime
 })
 
-export const provideTestRunHookWorld = Effect.fn("provideTestRunHookWorld")(function*<A, E, R>(
-  effect: Effect.Effect<A, E, R>,
+export const makeStepRuntime = Effect.fn("makeStepRuntime")(function* (active: ActiveStep) {
+  const activeStepContext = yield* makeActiveStepContext(active)
+  const attachments = yield* makeAttachments(active)
+  return {
+    provide: (<A, E, R>(effect: Effect.Effect<A, E, R | ActiveStepContext | Attachments>) =>
+      effect.pipe(
+        Effect.provideService(ActiveStepContext, activeStepContext),
+        Effect.provideService(Attachments, attachments),
+      )) as StepRuntime["provide"],
+  } satisfies StepRuntime
+})
+
+export const makeTestRunHookRuntime = Effect.fn("makeTestRunHookRuntime")(function* (
   active: { readonly testRunHookStartedId: string },
 ) {
   const activeStepContext = yield* makeActiveStepContext(undefined)
   const attachments = yield* makeAttachments(active)
   const world = yield* makeScenarioWorld
-  return yield* effect.pipe(
-    Effect.provideService(ActiveStepContext, activeStepContext),
-    Effect.provideService(Attachments, attachments),
-    Effect.provideService(ScenarioWorld, world),
-  )
+  return {
+    provide: (<A, E, R>(effect: Effect.Effect<A, E, R | ActiveStepContext | Attachments | ScenarioWorld>) =>
+      effect.pipe(
+        Effect.provideService(ActiveStepContext, activeStepContext),
+        Effect.provideService(Attachments, attachments),
+        Effect.provideService(ScenarioWorld, world),
+      )) as TestRunHookRuntime["provide"],
+  } satisfies TestRunHookRuntime
 })
 
 export const attach = Effect.fn("attach")(function* (

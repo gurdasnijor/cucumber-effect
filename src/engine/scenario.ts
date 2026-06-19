@@ -23,9 +23,9 @@ import { Cause, Clock, Effect, Exit, FileSystem, Option } from "effect"
 import { type StepError } from "./errors.ts"
 import {
   collectAttachments,
-  provideScenarioWorld,
-  provideStepWorld,
-  provideTestRunHookWorld,
+  makeScenarioRuntime,
+  makeStepRuntime,
+  makeTestRunHookRuntime,
   type ScenarioWorld,
   type WorldServices,
 } from "./world.ts"
@@ -93,7 +93,8 @@ export const runScenario = Effect.fn("runScenario")(function* (
     },
   }
 
-  const result = yield* provideScenarioWorld(runScenarioAttempt(assembled, testCaseStartedId))
+  const scenarioRuntime = yield* makeScenarioRuntime()
+  const result = yield* scenarioRuntime.provide(runScenarioAttempt(assembled, testCaseStartedId))
 
   const testCaseFinished: Envelope = {
     testCaseFinished: {
@@ -144,11 +145,12 @@ const runTestRunHook = Effect.fn("runTestRunHook")(function* (
     },
   }
   const started = yield* Clock.currentTimeMillis
-  const execution = yield* Effect.gen(function* () {
+  const runtime = yield* makeTestRunHookRuntime({ testRunHookStartedId })
+  const execution = yield* runtime.provide(Effect.gen(function* () {
     const exit = yield* invokeSupportFunction(hook.fn, []).pipe(Effect.exit)
     const attachments = yield* collectAttachments()
     return { exit, attachments }
-  }).pipe((effect) => provideTestRunHookWorld(effect, { testRunHookStartedId }))
+  }))
   const ended = yield* Clock.currentTimeMillis
   const duration = TimeConversion.millisecondsToDuration(ended - started)
   const result = Exit.match(execution.exit, {
@@ -258,11 +260,12 @@ const executeStep = Effect.fn("executeStep")(function* (
   }
 
   const started = yield* Clock.currentTimeMillis
-  const execution = yield* Effect.gen(function* () {
+  const runtime = yield* makeStepRuntime(active)
+  const execution = yield* runtime.provide(Effect.gen(function* () {
     const exit = yield* invokeStep(prepared).pipe(Effect.exit)
     const attachments = yield* collectAttachments()
     return { exit, attachments }
-  }).pipe((effect) => provideStepWorld(effect, active))
+  }))
   const ended = yield* Clock.currentTimeMillis
   const duration = TimeConversion.millisecondsToDuration(ended - started)
 
