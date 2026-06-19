@@ -9,7 +9,7 @@ import { Readable } from "node:stream"
 // source-reference paths, and the fixture repo's "samples/" path convention.
 type Json = undefined | null | boolean | number | string | Json[] | { readonly [key: string]: Json }
 
-export class NdjsonMessageStreamError extends Schema.TaggedErrorClass<NdjsonMessageStreamError>()(
+class NdjsonMessageStreamError extends Schema.TaggedErrorClass<NdjsonMessageStreamError>()(
   "NdjsonMessageStreamError",
   { error: Schema.Unknown },
 ) {}
@@ -33,7 +33,7 @@ export const normalizeForCckComparison = (envelopes: ReadonlyArray<Envelope>): R
   }
 
   return envelopes
-    .filter((envelope) => envelope.suggestion === undefined && envelope.meta === undefined)
+    .filter((envelope) => envelope.meta === undefined)
     .map((envelope) => normalizeValue(envelope as unknown as Json, remap, undefined))
 }
 

@@ -10,7 +10,9 @@ import { GherkinStreamError } from "./errors.ts"
 import { Registry } from "./registry.ts"
 import { assembleTestCases, runScenario, runTestRunHooks, supportCodeEnvelopes, testRunSuccess } from "./scenario.ts"
 
-export type RunFeaturesOptions = Pick<IGherkinStreamOptions, "relativeTo">
+export type RunFeaturesOptions = Pick<IGherkinStreamOptions, "relativeTo"> & {
+  readonly allowedRetries?: number
+}
 
 export const runFeatures = (
   paths: ReadonlyArray<string>,
@@ -44,16 +46,16 @@ const runFeaturePlan = Effect.fn("runFeaturePlan")(function* (
     },
   }
 
-  const testCases = assembleTestCases(nextId, testRunStartedId, supportCodeLibrary, parsed.gherkinDocuments, parsed.pickles)
   const beforeAllResult = yield* runTestRunHooks(nextId, testRunStartedId, supportCodeLibrary.getAllBeforeAllHooks())
   const shouldRunTestCases = testRunSuccess(beforeAllResult.statuses)
-  const scenarioResults = shouldRunTestCases
-    ? yield* Effect.forEach(
-      testCases,
-      (testCase) => runScenario(nextId, testCase, 0),
-      { concurrency: 1 },
-    )
+  const testCases = shouldRunTestCases
+    ? assembleTestCases(nextId, testRunStartedId, supportCodeLibrary, parsed.gherkinDocuments, parsed.pickles)
     : []
+  const scenarioResults = yield* Effect.forEach(
+    testCases,
+    (testCase) => runScenario(nextId, testCase, supportCodeLibrary, options.allowedRetries ?? 0),
+    { concurrency: 1 },
+  )
   const afterAllResult = yield* runTestRunHooks(nextId, testRunStartedId, [...supportCodeLibrary.getAllAfterAllHooks()].reverse())
   const statuses = [
     ...beforeAllResult.statuses,
@@ -74,7 +76,7 @@ const runFeaturePlan = Effect.fn("runFeaturePlan")(function* (
     ...supportEnvelopes,
     testRunStarted,
     ...beforeAllResult.envelopes,
-    ...(shouldRunTestCases ? testCases.map((testCase): Envelope => ({ testCase: testCase.toMessage() })) : []),
+    ...testCases.map((testCase): Envelope => ({ testCase: testCase.toMessage() })),
     ...scenarioResults.flatMap((result) => result.envelopes),
     ...afterAllResult.envelopes,
     testRunFinished,
