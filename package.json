@@ -16,6 +16,7 @@
     "diagnostics": "effect-language-service diagnostics --project tsconfig.json --strict",
     "lint": "effect-language-service diagnostics --project tsconfig.json --strict",
     "lint:dead": "knip",
+    "lint:dead:prod": "knip --production",
     "test": "vitest run",
     "cck": "vitest run test/cck/cck.test.ts"
   },

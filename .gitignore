@@ -3,3 +3,6 @@ dist/
 coverage/
 .DS_Store
 .vite/
+
+# Vendored source for reference only - not checked in
+repos/

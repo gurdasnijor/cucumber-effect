@@ -5,5 +5,5 @@ export {
   type StepImplementation,
   type SupportBuilder,
 } from "./engine/registry.ts"
-export { runFeatures, runFeaturesToArray, type RunFeaturesOptions } from "./engine/run.ts"
+export { runFeatures, type RunFeaturesOptions } from "./engine/run.ts"
 export { ActiveStepContext, Attachments, ScenarioWorld, attach, getWorld, link, log, setWorld, worldLayer } from "./engine/world.ts"

@@ -1,7 +1,7 @@
 import { NodeChildProcessSpawner, NodeFileSystem, NodePath, NodeTerminal } from "@effect/platform-node"
 import { it, expect } from "@effect/vitest"
 import { Effect, Layer, Ref, Sink, Stdio } from "effect"
-import { runCliWith } from "../../src/cli.ts"
+import { cliEffect } from "../../src/cli.ts"
 import { readCckNdjsonMessages } from "../cck/normalize.ts"
 
 const cliEnvironment = Layer.provideMerge(
@@ -18,17 +18,18 @@ it.effect("writes Cucumber message NDJSON to stdout", () =>
     const stdout = yield* Ref.make("")
     const stderr = yield* Ref.make("")
     const stdio = Stdio.layerTest({
+      args: Effect.succeed([
+        "node_modules/@cucumber/compatibility-kit/features/minimal/minimal.feature",
+        "--relative-to",
+        "node_modules/@cucumber/compatibility-kit/features",
+        "--format",
+        "message",
+      ]),
       stdout: () => Sink.forEach((chunk: string | Uint8Array) => Ref.update(stdout, (output) => output + chunkToString(chunk))),
       stderr: () => Sink.forEach((chunk: string | Uint8Array) => Ref.update(stderr, (output) => output + chunkToString(chunk))),
     })
 
-    yield* runCliWith([
-      "node_modules/@cucumber/compatibility-kit/features/minimal/minimal.feature",
-      "--relative-to",
-      "node_modules/@cucumber/compatibility-kit/features",
-      "--format",
-      "message",
-    ]).pipe(Effect.provide(Layer.mergeAll(cliEnvironment, stdio)))
+    yield* cliEffect.pipe(Effect.provide(Layer.mergeAll(cliEnvironment, stdio)))
 
     expect(yield* Ref.get(stderr)).toEqual("")
     const envelopes = yield* readCckNdjsonMessages(yield* Ref.get(stdout))

@@ -1,10 +1,8 @@
 import { NodeStream } from "@effect/platform-node"
 import { MessageToNdjsonStream } from "@cucumber/message-streams"
-import type { Envelope } from "@cucumber/messages"
 import { Effect, Option, Schema, Stdio, Stream } from "effect"
 import { Argument, Command, Flag } from "effect/unstable/cli"
-import { Readable } from "node:stream"
-import { defineSupport, runFeaturesToArray, type RunFeaturesOptions } from "./index.ts"
+import { defineSupport, runFeatures, type RunFeaturesOptions } from "./index.ts"
 
 const version = "0.1.0"
 
@@ -30,16 +28,15 @@ class MessageStreamError extends Schema.TaggedErrorClass<MessageStreamError>()(
   { error: Schema.Unknown },
 ) {}
 
-const renderMessagesAsNdjson = Effect.fn("renderMessagesAsNdjson")((envelopes: ReadonlyArray<Envelope>) =>
-  NodeStream.toString(
-    () => Readable.from(envelopes, { objectMode: true }).pipe(new MessageToNdjsonStream()),
-    { onError: (error) => new MessageStreamError({ error }) },
-  ))
-
 const runCli = Effect.fn("runCli")(function* (input: CliInput) {
-  const envelopes = yield* runFeaturesToArray(input.paths, runOptions(input))
-  const ndjson = yield* renderMessagesAsNdjson(envelopes)
-  yield* writeStdout(ndjson)
+  const stdio = yield* Stdio.Stdio
+  yield* runFeatures(input.paths, runOptions(input)).pipe(
+    NodeStream.pipeThroughDuplex({
+      evaluate: () => new MessageToNdjsonStream(),
+      onError: (error) => new MessageStreamError({ error }),
+    }),
+    Stream.run(stdio.stdout({ endOnDone: false })),
+  )
 })
 
 const cliCommand = Command.make("cucumber-effect", config, runCli).pipe(
@@ -51,8 +48,6 @@ const cliCommand = Command.make("cucumber-effect", config, runCli).pipe(
   Command.provide(defineSupport(() => {})),
 )
 
-export const runCliWith = Command.runWith(cliCommand, { version })
-
 export const cliEffect = Command.run(cliCommand, { version })
 
 const runOptions = (input: CliInput): RunFeaturesOptions =>
@@ -60,8 +55,3 @@ const runOptions = (input: CliInput): RunFeaturesOptions =>
     onNone: () => ({}),
     onSome: (relativeTo) => ({ relativeTo }),
   })
-
-const writeStdout = Effect.fn("writeStdout")(function* (output: string) {
-  const stdio = yield* Stdio.Stdio
-  yield* Stream.succeed(output).pipe(Stream.run(stdio.stdout({ endOnDone: false })))
-})

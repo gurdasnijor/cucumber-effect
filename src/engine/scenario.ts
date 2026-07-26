@@ -32,7 +32,6 @@ import { makeSnippets } from "./snippets.ts"
 
 type ScenarioResult = {
   readonly statuses: ReadonlyArray<TestStepResultStatus>
-  readonly envelopes: ReadonlyArray<Envelope>
 }
 
 type ScenarioAttemptResult = ScenarioResult & {
@@ -41,7 +40,6 @@ type ScenarioAttemptResult = ScenarioResult & {
 
 type StepExecution = {
   readonly result: TestStepResult
-  readonly envelopes: ReadonlyArray<Envelope>
 }
 
 type StepReturn = void | "pending" | "skipped"
@@ -50,7 +48,6 @@ type StepEffect = Effect.Effect<StepReturn, StepError, WorldServices>
 
 type ScenarioAttemptState = {
   readonly statuses: ReadonlyArray<TestStepResultStatus>
-  readonly envelopes: ReadonlyArray<Envelope>
   readonly failedish: boolean
   readonly skipped: boolean
 }
@@ -86,8 +83,9 @@ export const runScenario = Effect.fn("runScenario")(function* (
   assembled: AssembledTestCase,
   supportCodeLibrary: SupportCodeLibrary,
   allowedRetries: number,
+  writeEnvelope: (envelope: Envelope) => Effect.Effect<void>,
 ): Effect.fn.Return<ScenarioResult, never, FileSystem.FileSystem> {
-  return yield* runScenarioAttempts(nextId, assembled, supportCodeLibrary, allowedRetries, 0)
+  return yield* runScenarioAttempts(nextId, assembled, supportCodeLibrary, allowedRetries, 0, writeEnvelope)
 })
 
 const shouldRetryScenario = (result: ScenarioAttemptResult) =>
@@ -99,54 +97,60 @@ const runScenarioAttempts = Effect.fn("runScenarioAttempts")(function* (
   supportCodeLibrary: SupportCodeLibrary,
   allowedRetries: number,
   attempt: number,
+  writeEnvelope: (envelope: Envelope) => Effect.Effect<void>,
 ): Effect.fn.Return<ScenarioResult, never, FileSystem.FileSystem> {
-  const attemptResult = yield* runScenarioAttemptWithEnvelopes(nextId, assembled, supportCodeLibrary, attempt)
+  const attemptResult = yield* runScenarioAttempt(nextId, assembled, supportCodeLibrary, attempt, writeEnvelope)
   const willBeRetried = shouldRetryScenario(attemptResult) && attempt < allowedRetries
   const finishedAt = yield* Clock.currentTimeMillis
-  const envelopes = [
-    ...attemptResult.envelopes,
-    testCaseFinishedEnvelope(attemptResult.testCaseStartedId, willBeRetried, finishedAt),
-  ]
+  yield* writeEnvelope(testCaseFinishedEnvelope(attemptResult.testCaseStartedId, willBeRetried, finishedAt))
   if (!willBeRetried) {
     return {
       statuses: attemptResult.statuses,
-      envelopes,
     }
   }
-  const next = yield* runScenarioAttempts(nextId, assembled, supportCodeLibrary, allowedRetries, attempt + 1)
+  const next = yield* runScenarioAttempts(
+    nextId,
+    assembled,
+    supportCodeLibrary,
+    allowedRetries,
+    attempt + 1,
+    writeEnvelope,
+  )
   return {
     statuses: next.statuses,
-    envelopes: [...envelopes, ...next.envelopes],
   }
 })
 
-const runScenarioAttemptWithEnvelopes = Effect.fn("runScenarioAttemptWithEnvelopes")(function* (
+const runScenarioAttempt = Effect.fn("runScenarioAttempt")(function* (
   nextId: IdGenerator.NewId,
   assembled: AssembledTestCase,
   supportCodeLibrary: SupportCodeLibrary,
   attempt: number,
+  writeEnvelope: (envelope: Envelope) => Effect.Effect<void>,
 ): Effect.fn.Return<ScenarioAttemptResult, never, FileSystem.FileSystem> {
   const testCaseStartedId = nextId()
   const timestamp = TimeConversion.millisecondsSinceEpochToTimestamp(yield* Clock.currentTimeMillis)
-  const testCaseStarted: Envelope = {
+  yield* writeEnvelope({
     testCaseStarted: {
       id: testCaseStartedId,
       testCaseId: assembled.id,
       timestamp,
       attempt,
     },
-  }
+  })
 
   const scenarioRuntime = yield* makeScenarioRuntime()
-  const result = yield* scenarioRuntime.provide(runScenarioAttempt(nextId, assembled, supportCodeLibrary, testCaseStartedId))
+  const result = yield* scenarioRuntime.provide(runScenarioSteps(
+    nextId,
+    assembled,
+    supportCodeLibrary,
+    testCaseStartedId,
+    writeEnvelope,
+  ))
 
   return {
     testCaseStartedId,
     statuses: result.statuses,
-    envelopes: [
-      testCaseStarted,
-      ...result.envelopes,
-    ],
   }
 })
 
@@ -154,15 +158,15 @@ export const runTestRunHooks = Effect.fn("runTestRunHooks")(function* (
   nextId: IdGenerator.NewId,
   testRunStartedId: string,
   hooks: ReadonlyArray<DefinedTestRunHook>,
+  writeEnvelope: (envelope: Envelope) => Effect.Effect<void>,
 ): Effect.fn.Return<ScenarioResult, never, FileSystem.FileSystem> {
   const results = yield* Effect.forEach(
     hooks,
-    (hook) => runTestRunHook(nextId, testRunStartedId, hook),
+    (hook) => runTestRunHook(nextId, testRunStartedId, hook, writeEnvelope),
     { concurrency: 1 },
   )
   return {
     statuses: results.map((result) => result.status),
-    envelopes: results.flatMap((result) => result.envelopes),
   }
 })
 
@@ -170,16 +174,17 @@ const runTestRunHook = Effect.fn("runTestRunHook")(function* (
   nextId: IdGenerator.NewId,
   testRunStartedId: string,
   hook: DefinedTestRunHook,
+  writeEnvelope: (envelope: Envelope) => Effect.Effect<void>,
 ) {
   const testRunHookStartedId = nextId()
-  const testRunHookStarted: Envelope = {
+  yield* writeEnvelope({
     testRunHookStarted: {
       id: testRunHookStartedId,
       testRunStartedId,
       hookId: hook.id,
       timestamp: TimeConversion.millisecondsSinceEpochToTimestamp(yield* Clock.currentTimeMillis),
     },
-  }
+  })
   const started = yield* Clock.currentTimeMillis
   const runtime = yield* makeTestRunHookRuntime({ testRunHookStartedId })
   const execution = yield* runtime.provide(Effect.gen(function* () {
@@ -203,39 +208,41 @@ const runTestRunHook = Effect.fn("runTestRunHook")(function* (
       duration,
     }),
   })
-  const testRunHookFinished: Envelope = {
+  yield* Effect.forEach(
+    execution.attachments,
+    (attachment) => writeEnvelope({ attachment }),
+    { concurrency: 1, discard: true },
+  )
+  yield* writeEnvelope({
     testRunHookFinished: {
       testRunHookStartedId,
       result,
       timestamp: TimeConversion.millisecondsSinceEpochToTimestamp(yield* Clock.currentTimeMillis),
     },
-  }
+  })
   return {
     status: result.status,
-    envelopes: [
-      testRunHookStarted,
-      ...execution.attachments.map((attachment): Envelope => ({ attachment })),
-      testRunHookFinished,
-    ],
   }
 })
 
-const runScenarioAttempt = Effect.fn("runScenarioAttempt")(function* (
+const runScenarioSteps = Effect.fn("runScenarioSteps")(function* (
   nextId: IdGenerator.NewId,
   assembled: AssembledTestCase,
   supportCodeLibrary: SupportCodeLibrary,
   testCaseStartedId: string,
+  writeEnvelope: (envelope: Envelope) => Effect.Effect<void>,
 ) {
   const initial: ScenarioAttemptState = {
     statuses: [],
-    envelopes: [],
     failedish: false,
     skipped: false,
   }
 
   return yield* assembled.testSteps.reduce(
     (effect, step) =>
-      effect.pipe(Effect.flatMap((state) => runScenarioStep(nextId, state, step, supportCodeLibrary, testCaseStartedId))),
+      effect.pipe(Effect.flatMap((state) =>
+        runScenarioStep(nextId, state, step, supportCodeLibrary, testCaseStartedId, writeEnvelope)
+      )),
     Effect.succeed(initial) as Effect.Effect<ScenarioAttemptState, never, ScenarioWorld | FileSystem.FileSystem>,
   )
 })
@@ -246,43 +253,38 @@ const runScenarioStep = Effect.fn("runScenarioStep")(function* (
   step: AssembledTestStep,
   supportCodeLibrary: SupportCodeLibrary,
   testCaseStartedId: string,
+  writeEnvelope: (envelope: Envelope) => Effect.Effect<void>,
 ): Effect.fn.Return<ScenarioAttemptState, never, ScenarioWorld | FileSystem.FileSystem> {
-  const testStepStarted: Envelope = {
+  yield* writeEnvelope({
     testStepStarted: {
       testCaseStartedId,
       testStepId: step.id,
       timestamp: TimeConversion.millisecondsSinceEpochToTimestamp(yield* Clock.currentTimeMillis),
     },
-  }
+  })
 
   const execution = state.skipped && !step.always
-    ? { result: zeroDurationResult(TestStepResultStatus.SKIPPED), envelopes: [] }
+    ? { result: zeroDurationResult(TestStepResultStatus.SKIPPED) }
     : state.failedish && !step.always
-      ? executeStepAfterFailure(nextId, step, supportCodeLibrary)
-      : yield* executeStep(nextId, step, supportCodeLibrary, { testCaseStartedId, testStepId: step.id })
+      ? yield* executeStepAfterFailure(nextId, step, supportCodeLibrary, writeEnvelope)
+      : yield* executeStep(nextId, step, supportCodeLibrary, { testCaseStartedId, testStepId: step.id }, writeEnvelope)
 
   const result = execution.result
   const skipped = state.skipped || (result.status === TestStepResultStatus.SKIPPED && !state.failedish)
   const failedish = state.failedish ||
     (result.status !== TestStepResultStatus.PASSED && result.status !== TestStepResultStatus.SKIPPED)
 
-  const testStepFinished: Envelope = {
+  yield* writeEnvelope({
     testStepFinished: {
       testCaseStartedId,
       testStepId: step.id,
       testStepResult: result,
       timestamp: TimeConversion.millisecondsSinceEpochToTimestamp(yield* Clock.currentTimeMillis),
     },
-  }
+  })
 
   return {
     statuses: [...state.statuses, result.status],
-    envelopes: [
-      ...state.envelopes,
-      testStepStarted,
-      ...execution.envelopes,
-      testStepFinished,
-    ],
     failedish,
     skipped,
   }
@@ -293,16 +295,17 @@ const executeStep = Effect.fn("executeStep")(function* (
   step: AssembledTestStep,
   supportCodeLibrary: SupportCodeLibrary,
   active: { readonly testCaseStartedId: string; readonly testStepId: string },
+  writeEnvelope: (envelope: Envelope) => Effect.Effect<void>,
 ): Effect.fn.Return<StepExecution, never, ScenarioWorld | FileSystem.FileSystem> {
   const prepared = step.prepare()
   if (prepared.type === "undefined") {
+    yield* writeEnvelope(suggestionEnvelope(nextId, prepared.pickleStep, supportCodeLibrary))
     return {
       result: zeroDurationResult(TestStepResultStatus.UNDEFINED),
-      envelopes: [suggestionEnvelope(nextId, prepared.pickleStep, supportCodeLibrary)],
     }
   }
   if (prepared.type === "ambiguous") {
-    return { result: zeroDurationResult(TestStepResultStatus.AMBIGUOUS), envelopes: [] }
+    return { result: zeroDurationResult(TestStepResultStatus.AMBIGUOUS) }
   }
 
   const started = yield* Clock.currentTimeMillis
@@ -330,29 +333,35 @@ const executeStep = Effect.fn("executeStep")(function* (
     }),
   })
 
+  yield* Effect.forEach(
+    execution.attachments,
+    (attachment) => writeEnvelope({ attachment }),
+    { concurrency: 1, discard: true },
+  )
+
   return {
     result,
-    envelopes: execution.attachments.map((attachment): Envelope => ({ attachment })),
   }
 })
 
-const executeStepAfterFailure = (
+const executeStepAfterFailure = Effect.fn("executeStepAfterFailure")(function* (
   nextId: IdGenerator.NewId,
   step: AssembledTestStep,
   supportCodeLibrary: SupportCodeLibrary,
-): StepExecution => {
+  writeEnvelope: (envelope: Envelope) => Effect.Effect<void>,
+): Effect.fn.Return<StepExecution> {
   const prepared = step.prepare()
   if (prepared.type === "undefined") {
+    yield* writeEnvelope(suggestionEnvelope(nextId, prepared.pickleStep, supportCodeLibrary))
     return {
       result: zeroDurationResult(TestStepResultStatus.UNDEFINED),
-      envelopes: [suggestionEnvelope(nextId, prepared.pickleStep, supportCodeLibrary)],
     }
   }
   if (prepared.type === "ambiguous") {
-    return { result: zeroDurationResult(TestStepResultStatus.AMBIGUOUS), envelopes: [] }
+    return { result: zeroDurationResult(TestStepResultStatus.AMBIGUOUS) }
   }
-  return { result: zeroDurationResult(TestStepResultStatus.SKIPPED), envelopes: [] }
-}
+  return { result: zeroDurationResult(TestStepResultStatus.SKIPPED) }
+})
 
 const suggestionEnvelope = (
   nextId: IdGenerator.NewId,

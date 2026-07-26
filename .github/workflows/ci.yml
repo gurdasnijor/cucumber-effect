@@ -36,6 +36,9 @@ jobs:
       - name: Dead-code
         run: pnpm run lint:dead
 
+      - name: Production dead-code
+        run: pnpm run lint:dead:prod
+
   typecheck:
     name: Typecheck
     runs-on: ubuntu-latest
